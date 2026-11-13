@@ -1,0 +1,44 @@
+[project]
+name = "voice-agent"
+version = "0.1.0"
+description = "Personal voice agent that answers calls as Thanooj's AI"
+readme = "README.md"
+authors = [
+    { name = "thanoojrao", email = "61050556+thanoojrao@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "anthropic>=2.8.0",
+    "audioop-lts>=0.2.2",
+    "fastapi>=0.162.5",
+    "jinja2>=3.1.6",
+    "pydantic-settings>=2.16.2",
+    "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "ruff>=0.17.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

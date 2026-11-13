@@ -1,0 +1,33 @@
+# Owner-editable settings (spec: Product variables, v0 only).
+# Changing anything here needs a restart. Secrets go in .env, never here.
+
+owner_name: Thanooj
+
+# Opening line on every call. {owner_name} is filled in.
+greeting: "Hi, this is {owner_name}'s AI. I can tell you about my work and what I'm up to. This call is transcribed so the real me can follow up."
+# Asked right after the greeting, only in a caller's first session.
+name_question: "Who am I speaking with?"
+
+tone: friendly, concise
+
+# Cartesia voice ID: your clone, or a stock voice if the clone doesn't sound right.
+voice_id: ""
+llm_model: claude-haiku-5-5
+
+# Timers and caps
+silence_prompt_s: 8               # 5-15
+silence_hangup_s: 20              # 10-60
+max_session_min: 10               # 3-30
+daily_session_cap: 50
+per_caller_sessions_per_day: 3    # 1-10
+max_concurrent_sessions: 2        # 1-10
+
+# Knowledge base behaviour
+status_stale_days: 14             # 7-60
+featured_projects: 3              # 1-5
+do_not_discuss: [salary, address, family, health, politics]
+
+warm_intro: true
+record_transcripts: true          # text only, never audio
+blocked_numbers: []               # E.164, e.g. "+15551234567"
+db_path: data/agent.db
