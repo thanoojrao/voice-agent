@@ -300,7 +300,8 @@ TurnEnded(transcript)
 Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*. The Twilio adapter sends `mark` messages after each word's audio, and Twilio echoes them back as each one finishes playing. Cartesia's word timestamps tell us which word ends at which byte offset.
 
 - `on_mark_played("w17")` means the caller has heard up to word 17.
-- On interruption, the spoken text is the words up to the last played mark. History stores only that text, and the turn row gets `interrupted = 1` (spec: Interruptions).
+- On interruption, the spoken text is the words up to the last played mark. History stores only that text, ending in "—" so the model knows it was cut off, and the turn row gets `interrupted = 1` (spec: Interruptions). Tool calls in the turn are kept, since they ran either way.
+- `core/history.py` also keeps the shape the LLM API expects: it starts with a placeholder user message ("(The call has connected.)") before the greeting, and roles alternate (back-to-back caller turns are merged).
 
 ### 6.4 Barge-in (`core/bargein.py`)
 
