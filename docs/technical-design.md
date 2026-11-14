@@ -75,7 +75,7 @@ voice_agent/
 │   │   ├── prompt.py            # system prompt assembly (KB + instructions + session context)
 │   │   ├── tools.py             # save_message, save_caller_details, end_session + handlers
 │   │   ├── greeting.py          # opening line, warm intro, name question
-│   │   └── clips.py             # loads apology/filler/busy clips
+│   │   └── clips.py             # loads + checks apology and filler clips (busy is served by Twilio)
 │   ├── adapters/
 │   │   └── twilio/
 │   │       ├── routes.py        # POST /twilio/voice, /twilio/fallback, WS /twilio/stream
