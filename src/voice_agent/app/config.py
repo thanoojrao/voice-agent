@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from voice_agent.core.greeting import GreetingTemplates
 
 E164 = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{6,14}$")]
 
@@ -47,6 +49,7 @@ class AgentConfig(BaseModel):
 
     owner_name: str = Field(min_length=1)
     greeting: str = Field(min_length=1)
+    greeting_returning: str = Field(min_length=1)
     name_question: str = Field(min_length=1)
     tone: str = "friendly, concise"
     voice_id: str = ""
@@ -68,8 +71,30 @@ class AgentConfig(BaseModel):
     blocked_numbers: list[E164] = []
     db_path: Path = Path("data/agent.db")
 
-    def opening_line(self) -> str:
-        return self.greeting.format(owner_name=self.owner_name)
+    @model_validator(mode="after")
+    def _check_templates(self) -> "AgentConfig":
+        # Fill every template now so a typo'd placeholder fails at startup, not mid-call.
+        allowed = {
+            "greeting": {"owner_name"},
+            "greeting_returning": {"owner_name", "caller_name"},
+            "name_question": {"owner_name"},
+        }
+        for field, names in allowed.items():
+            try:
+                getattr(self, field).format(**dict.fromkeys(names, "x"))
+            except (KeyError, IndexError, ValueError) as e:
+                raise ValueError(f"{field}: bad placeholder {e} (allowed: {sorted(names)})") from e
+        if "{caller_name}" not in self.greeting_returning:
+            raise ValueError("greeting_returning must include {caller_name}")
+        return self
+
+    def greeting_templates(self) -> GreetingTemplates:
+        return GreetingTemplates(
+            owner_name=self.owner_name,
+            greeting=self.greeting,
+            greeting_returning=self.greeting_returning,
+            name_question=self.name_question,
+        )
 
 
 def load_agent_config(path: Path) -> AgentConfig:

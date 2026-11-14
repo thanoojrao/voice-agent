@@ -11,11 +11,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_repo_config_loads():
     cfg = load_agent_config(REPO_ROOT / "agent.config.yaml")
     assert cfg.owner_name == "Thanooj"
-    assert cfg.opening_line().startswith("Hi, this is Thanooj's AI.")
+    t = cfg.greeting_templates()
+    assert t.greeting.format(owner_name=t.owner_name).startswith("Hi, this is Thanooj's AI.")
 
 
 def base(**overrides):
-    data = {"owner_name": "T", "greeting": "Hi", "name_question": "Who?"}
+    data = {
+        "owner_name": "T",
+        "greeting": "Hi",
+        "greeting_returning": "Hi {caller_name}",
+        "name_question": "Who?",
+    }
     return {**data, **overrides}
 
 
@@ -45,3 +51,17 @@ def test_settings_require_reports_missing_keys():
     s.require("anthropic_api_key")
     with pytest.raises(RuntimeError, match="DEEPGRAM_API_KEY"):
         s.require("anthropic_api_key", "deepgram_api_key")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"greeting": "Hi {caller_name}"},  # plain greeting has no caller name to fill
+        {"greeting": "Hi {ownr_name}"},
+        {"greeting_returning": "Hi {owner_name}"},  # forgot the caller's name
+        {"name_question": "Who is {"},
+    ],
+)
+def test_bad_greeting_templates_rejected(overrides):
+    with pytest.raises(ValidationError):
+        AgentConfig.model_validate(base(**overrides))
