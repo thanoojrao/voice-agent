@@ -311,6 +311,7 @@ Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*
 - A noise with no transcribed words (`NOTHING`) never interrupts.
 - If the caller's turn ends as only a backchannel while the agent is speaking, the turn is dropped, not answered.
 - The 300 ms acceptance target is measured from Flux's first-word event to the `clear` being sent. It's the first number to check on a real call.
+- **Possible later improvement.** The word list can't read context ("Right." as an answer vs. as a listening noise) or phrasing it doesn't list ("makes sense"). If real calls show misses of that kind, keep the word list as the instant first check and send only unclear cases to a fast decision model (a "System One" model such as TypeSafe AI's Jev) behind the same `classify()` signature, falling back to the word list if it doesn't answer within about 100 ms. Measure its round-trip latency against the 300 ms budget first. It reads text only, so tone ("okay." meaning "stop") would still need an audio timing model.
 
 ---
 
