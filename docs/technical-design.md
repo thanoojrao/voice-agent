@@ -291,7 +291,7 @@ TurnEnded(transcript)
 ```
 
 - The LLM, TTS and playback steps run as concurrent asyncio tasks, connected by queues. Cancelling the turn cancels the task group.
-- **Sentence splitter.** Splits on `.?!` followed by whitespace, but not after common abbreviations ("e.g.", "Dr.", version numbers). It flushes a long clause at a comma after about 120 characters, so the first audio is never stuck behind a long sentence.
+- **Sentence splitter.** Splits on `.?!` followed by whitespace, but not after common abbreviations ("e.g.", "Dr.", version numbers). It flushes a long clause at a comma or dash after about 200 characters, so the first audio is never stuck behind a long sentence.
 - **Filler.** If the timer fires before the first TTS chunk, play a random filler clip. TTS audio queued meanwhile plays after it. Fillers never enter `history`.
 - **Latency.** `latency_ms` is measured from `TurnEnded` to the first audio chunk sent to the adapter, and stored on the agent turn.
 
@@ -305,10 +305,11 @@ Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*
 ### 6.4 Barge-in (`core/bargein.py`)
 
 - On `TurnStarted` while Speaking or Thinking: become *tentatively interrupted*. Keep playing, and wait for words.
-- On the first `Words(text)`:
-  - If every word is a backchannel (`mm-hm, mhm, uh-huh, yeah, yep, okay, ok, right, sure, cool`), ignore it and stay in Speaking.
-  - Otherwise interrupt: `adapter.clear_audio()` (Twilio `clear`), cancel the LLM and TTS tasks, trim history (§6.3), go to Listening.
-- A noise with no transcribed words never interrupts.
+- On each `Words(text)` while tentative, `classify(text)` returns `NOTHING`, `BACKCHANNEL` or `SPEECH`:
+  - `BACKCHANNEL` (only listening noises such as `mm-hm, uh-huh, yeah, okay, right, sure, got it`): keep speaking. The transcript keeps growing, so the next update is checked again ("yeah" → "yeah but wait").
+  - `SPEECH`: interrupt. `adapter.clear_audio()` (Twilio `clear`), cancel the LLM and TTS tasks, trim history (§6.3), go to Listening.
+- A noise with no transcribed words (`NOTHING`) never interrupts.
+- If the caller's turn ends as only a backchannel while the agent is speaking, the turn is dropped, not answered.
 - The 300 ms acceptance target is measured from Flux's first-word event to the `clear` being sent. It's the first number to check on a real call.
 
 ---
