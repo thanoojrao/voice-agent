@@ -1,6 +1,6 @@
 # Voice Agent — Technical Design (v0)
 
-Status: draft for v0 · Last updated: 2026-11-13 (build step 1 done)
+Status: draft for v0 · Last updated: 2026-11-14 (build step 2 in progress)
 The product spec (use cases, decisions, settings) is kept separately and is the source of truth for *what*; this doc covers *how*. Spec references such as "D30" or "UC-8" point to it.
 
 This document turns the product spec into code structure. When the two disagree, the spec wins and this doc gets fixed.
@@ -73,7 +73,7 @@ voice_agent/
 │   │   ├── bargein.py           # backchannel filter
 │   │   ├── history.py           # conversation history + trimming on interruption
 │   │   ├── prompt.py            # system prompt assembly (KB + instructions + session context)
-│   │   ├── tools.py             # save_message, end_session definitions + handlers
+│   │   ├── tools.py             # save_message, save_caller_details, end_session + handlers
 │   │   ├── greeting.py          # opening line, warm intro, name question
 │   │   └── clips.py             # loads apology/filler/busy clips
 │   ├── adapters/
@@ -233,7 +233,7 @@ sequenceDiagram
 1. `get_or_create_caller(channel, address)`. A `None` address creates a one-off anonymous caller row (spec D30).
 2. `create_session(...)`, then open the STT stream.
 3. Build the session context: caller name if known, last session's summary if under 90 days old, anonymous flag, today's date.
-4. Speak the greeting (§8.4). Name question only when no name is saved, and every time for anonymous callers.
+4. Speak the greeting (§8.4). Name question only in a caller's first session, and every time for anonymous callers (spec: ask once; if they decline, don't ask again).
 
 **End of a session.** Triggered by the `end_session` tool, the silence timeout, the `max_session_min` limit, the caller hanging up (WS `stop`), or a fatal provider failure.
 1. Cancel in-flight LLM/TTS, close STT.
@@ -370,16 +370,17 @@ This is configured as the number's fallback URL in the Twilio console. It return
 2. **Knowledge base:** all `kb/` files concatenated in a fixed order with headers, read once at startup. **`cache_control: {"type": "ephemeral"}` goes on this block.**
 3. **Session context:** today's date, caller name or "unknown", last-session summary or none, anonymous yes/no. Not cached, and placed after the breakpoint so it can change per session without invalidating the cache.
 
-- Tools (`save_message`, `end_session`) render before `system`. The list is static and in a fixed order, so it stays inside the cached prefix.
+- Tools (`save_message`, `save_caller_details`, `end_session`) render before `system`. The list is static and in a fixed order, so it stays inside the cached prefix.
 - Silent cache-breakers to avoid: timestamps or caller data in blocks 1–2, and non-deterministic KB file ordering. Log `usage.cache_read_input_tokens` on every turn, and treat a zero after the first turn of a session as a bug.
 - The minimum cacheable prefix on Haiku 5.5 is 512 tokens, which the instructions plus knowledge base easily exceed.
 
 ### 8.3 Tools
-Both tools use `strict: true` and `eager_input_streaming: true`, with `tool_choice` left as `auto`. Forced tool choice isn't used.
+All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choice` left as `auto`. Forced tool choice isn't used.
 
 | Tool | Input schema | Handler |
 | --- | --- | --- |
 | `save_message` | `{name: string, contact: string, body: string}` | Validate the input. `storage.save_message`, then `notifier.message_left(...)` immediately, then `mark_message_notified`. Return `{"saved": true}`, or an `is_error` result on failure. |
+| `save_caller_details` | `{name?: string, company?: string, reason?: string}` | Used when the caller gives their name (answering the name question, or offering it unprompted), corrects a name we have wrong ("Actually, I'm not Sam, I'm Alex"), or mentions their company or reason for calling. `storage.set_caller_details`; omitted fields keep their stored value. Rejects a name that fails the name check (§8.4) with an `is_error` result. Return `{"ok": true}`. |
 | `end_session` | `{reason: "goodbye" \| "abuse" \| "limit"}` | Set the session to end once the current spoken text finishes playing. Return `{"ok": true}`. |
 
 - Because of eager input streaming, the accumulated tool input can be incomplete. Parse it, validate against the schema, and on failure return an `is_error` tool result rather than running the handler.
@@ -387,9 +388,17 @@ Both tools use `strict: true` and `eager_input_streaming: true`, with `tool_choi
 - The instructions tell the model to read the message back and get a "yes" before calling `save_message`, and to say its closing line before calling `end_session`.
 
 ### 8.4 Greeting
-The opening line comes from `agent.config.yaml → greeting` and is spoken directly, with no LLM call, so the first audio is instant. It's added to `history` as the first assistant turn.
+`core/greeting.py` builds the opening from fixed config text, spoken directly with no LLM call, so the first audio is instant. It's added to `history` as the first assistant turn. The disclosure wording is identical for every caller and is never generated.
 
-The warm intro is the exception. When a returning caller has a summary from the last 90 days, a short LLM turn produces the line ("Welcome back, Sam — last time we talked about the voice agent. Want to pick that up?") and is spoken right after the fixed disclosure line. The disclosure itself is never generated.
+| Caller | Opening |
+| --- | --- |
+| First session, or anonymous | `greeting` ("Hi, this is Thanooj's AI. …"), then `name_question` ("Who am I speaking with?") |
+| Returning, no usable name saved (declined, or a mangled name) | `greeting`, no name question |
+| Returning, with a usable saved name | `greeting_returning` ("Hi Sam, this is Thanooj's AI. …"), no name question |
+
+- **Name check.** A saved name is used in the greeting only if it looks like a real name: 1–3 words, at most 40 characters, letters plus spaces, hyphens and apostrophes. Otherwise the caller gets the plain greeting. Names come from speech recognition, so a mangled one is possible.
+- **Wrong person.** If the caller says the name is wrong (a shared or recycled number), the model asks for their name and calls `save_caller_details` (§8.3).
+- **Warm intro.** When a returning caller has a summary from the last 90 days and `warm_intro` is on, a short separate LLM request (just the summary, not the full conversation) writes one line that offers the last topic ("Last time we talked about the voice agent. Want to pick that up?"). The name was already said, so the line doesn't repeat it. It starts generating while the greeting plays and is spoken right after it.
 
 ### 8.5 Errors and the fallback clip
 - Retry once on `anthropic.APIConnectionError`, `RateLimitError` and 5xx `APIStatusError`, and on a first-token timeout (`PROVIDER_TIMEOUT_S`).
@@ -476,7 +485,7 @@ Every turn is written as it completes (spec: dropped calls keep their transcript
 | Source | Holds | Loaded by |
 | --- | --- | --- |
 | `.env` | `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `TWILIO_AUTH_TOKEN` (signature check), `OWNER_EMAIL`, `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `ADMIN_PASSWORD`, `PUBLIC_BASE_URL` | `pydantic-settings` |
-| `agent.config.yaml` | the spec's Product variables (greeting, voice_id, caps, silence timers, do_not_discuss, …) | pydantic model, validated at startup; bad config refuses to start |
+| `agent.config.yaml` | the spec's Product variables (greeting, greeting_returning, name_question, voice_id, caps, silence timers, do_not_discuss, …) | pydantic model, validated at startup; bad config refuses to start |
 | `app/constants.py` | the spec's "Constants in code (v0)" | import |
 
 v0 has no hot reload. Changing config or the knowledge base means a restart or redeploy (spec D28).
@@ -507,7 +516,7 @@ v0 has no hot reload. Changing config or the knowledge base means a restart or r
 | Level | What | How |
 | --- | --- | --- |
 | Unit | sentence splitter, backchannel filter, history trimming from marks, greeting/warm-intro rules, TwiML builders, μ-law codec, caps logic | plain pytest |
-| Integration (core) | full sessions: greeting → question → answer; barge-in mid-answer; filler; `save_message` + email; `end_session`; anonymous caller; provider failure → apology clip | `FakeVoiceAdapter` + `FakeSTT` (scripted events) + `FakeLLM` (scripted deltas/tool calls) + `FakeTTS` (timestamps) + in-memory SQLite + `FakeNotifier` |
+| Integration (core) | full sessions: greeting → question → answer; returning-caller greeting; name saved via `save_caller_details`; barge-in mid-answer; filler; `save_message` + email; `end_session`; anonymous caller; provider failure → apology clip | `FakeVoiceAdapter` + `FakeSTT` (scripted events) + `FakeLLM` (scripted deltas/tool calls) + `FakeTTS` (timestamps) + in-memory SQLite + `FakeNotifier` |
 | Contract | each provider maps vendor events to our types correctly | recorded vendor messages replayed from fixtures |
 | Manual | real calls against the spec's acceptance list | the checklist, run on a phone |
 | Eval (later) | 30 KB questions, 10 out-of-scope, 10 injection | separate script against the real LLM with the real prompt |

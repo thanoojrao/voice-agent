@@ -5,7 +5,7 @@ owner_name: Thanooj
 
 # Opening line on every call. {owner_name} is filled in.
 greeting: "Hi, this is {owner_name}'s AI. I can tell you about my work and what I'm up to. This call is transcribed so the real me can follow up."
-# Asked right after the greeting, only in a caller's first session.
+# Asked right after the greeting in a caller's first session (and always for anonymous callers).
 name_question: "Who am I speaking with?"
 
 tone: friendly, concise
