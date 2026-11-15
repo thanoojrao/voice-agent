@@ -44,10 +44,13 @@ class FakeVoiceAdapter:
     """Records what the core plays and lets the test act as the caller's phone.
 
     `capabilities` defaults to none at all, which is the strictest case for the core.
+    With `auto_play`, every mark is echoed back as soon as it's sent, as if the audio
+    played instantly; turn it off to hold the agent "mid-sentence".
     """
 
-    def __init__(self, capabilities: frozenset[Capability] = frozenset()):
+    def __init__(self, capabilities: frozenset[Capability] = frozenset(), auto_play: bool = False):
         self.capabilities = capabilities
+        self.auto_play = auto_play
         self.callbacks: SessionCallbacks | None = None
         self.audio: list[bytes] = []
         self.clears = 0
@@ -70,6 +73,8 @@ class FakeVoiceAdapter:
     async def mark(self, name: str) -> None:
         self.marks.append(name)
         self.pending_marks.append(name)
+        if self.auto_play and self.callbacks is not None:
+            await self.play_marks()
 
     async def end_session(self) -> None:
         if Capability.END_SESSION not in self.capabilities:

@@ -55,19 +55,6 @@ SETTINGS = SessionSettings(
 )
 
 
-class EchoAdapter(FakeVoiceAdapter):
-    """Echoes marks straight back (audio "plays" instantly) unless `echo` is off."""
-
-    def __init__(self) -> None:
-        super().__init__(frozenset({Capability.END_SESSION}))
-        self.echo = True
-
-    async def mark(self, name: str) -> None:
-        await super().mark(name)
-        if self.echo:
-            await self.play_marks()
-
-
 @pytest.fixture
 async def store(tmp_path):
     s = await SqliteStorage.open(tmp_path / "agent.db", now=lambda: NOW)
@@ -87,7 +74,7 @@ class Call:
         self.llm = FakeLLM(replies)
         self.stt = FakeSTT()
         self.tts = FakeTTS()
-        self.adapter = EchoAdapter()
+        self.adapter = FakeVoiceAdapter(frozenset({Capability.END_SESSION}), auto_play=True)
         self.notifier = FakeNotifier()
         deps = SessionDeps(
             storage=store,
@@ -222,13 +209,13 @@ async def test_call_with_no_caller_words_is_not_summarized(store):
 async def test_real_words_interrupt_the_agent(store):
     call = Call(store, [reply("One two three four five six."), reply("Sure, go ahead.")])
     await call.connect()
-    call.adapter.echo = False
+    call.adapter.auto_play = False
     call.say("Question.")
     await until(lambda: "t2.end" in call.adapter.marks)  # all sent, still "playing"
 
     call.stt.stream.emit(TurnStarted(), Words("wait actually"))
     await until(lambda: call.adapter.clears == 1)
-    call.adapter.echo = True
+    call.adapter.auto_play = True
     call.stt.stream.emit(TurnEnded("wait actually"))
     await call.played(3)
 
@@ -243,7 +230,7 @@ async def test_real_words_interrupt_the_agent(store):
 async def test_backchannel_does_not_interrupt_and_is_not_answered(store):
     call = Call(store, [reply("One two three four five six.")])
     await call.connect()
-    call.adapter.echo = False
+    call.adapter.auto_play = False
     call.say("Question.")
     await until(lambda: "t2.end" in call.adapter.marks)
 
@@ -258,10 +245,10 @@ async def test_backchannel_does_not_interrupt_and_is_not_answered(store):
 async def test_interrupting_the_goodbye_keeps_the_call_going(store):
     call = Call(store, [goodbye("Bye for now, take care."), reply("Of course.")])
     await call.connect()
-    call.adapter.echo = False
+    call.adapter.auto_play = False
     call.say("That's all.")
     await until(lambda: "t2.end" in call.adapter.marks)
-    call.adapter.echo = True
+    call.adapter.auto_play = True
     call.say("Oh wait, one more thing.")
     await call.played(3)
     assert not call.adapter.ended
@@ -345,7 +332,7 @@ async def test_speech_to_text_dropping_ends_the_call(store):
 async def test_hang_up_mid_reply_stores_what_was_heard_without_clearing(store):
     call = Call(store, [reply("One two three four.")])
     await call.connect()
-    call.adapter.echo = False
+    call.adapter.auto_play = False
     call.say("Question.")
     await until(lambda: "t2.end" in call.adapter.marks)
     await call.adapter.play_marks(1)  # "t2.w4" played, "t2.end" not yet
