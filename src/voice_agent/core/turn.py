@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -155,6 +155,23 @@ class Turn:
     async def result(self) -> TurnResult:
         return await self._require_task()
 
+    def on_done(self, callback: Callable[[TurnResult], None]) -> None:
+        """Call `callback` when the turn finishes by itself. Not called after interrupt(),
+        which returns its result directly. Lets the session hear about the turn without
+        awaiting its task (cancelling an awaiter would cancel the turn mid-cleanup)."""
+
+        def done(task: asyncio.Task[TurnResult]) -> None:
+            if task.cancelled():
+                return
+            if (error := task.exception()) is not None:  # a bug in the turn itself
+                log.error("turn crashed: %r", error, exc_info=error)
+                spoken = self._close_history(self._words_heard)
+                callback(self._result(Outcome.FAILED, spoken, error=repr(error)))
+                return
+            callback(task.result())
+
+        self._require_task().add_done_callback(done)
+
     async def interrupt(self, clear_audio: bool = True) -> TurnResult:
         """Stop now and keep only what the caller heard. Pass clear_audio=False when the
         caller has hung up and there's no phone to clear."""
@@ -221,8 +238,8 @@ class Turn:
                 break
             rounds += 1
             await self._run_tools(calls, over_limit=rounds > MAX_TOOL_ROUNDS)
-            if rounds > MAX_TOOL_ROUNDS:
-                break
+            if rounds > MAX_TOOL_ROUNDS or self._deps.tool_ctx.end_reason:
+                break  # end_session comes after the closing line: nothing more to say
         await tts.finish()
 
     async def _request(self, tts: TtsStream) -> tuple[list[ToolCall], bool]:
