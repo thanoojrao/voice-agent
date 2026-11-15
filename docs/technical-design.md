@@ -52,9 +52,10 @@ voice_agent/
 ├── pyproject.toml / uv.lock
 ├── .env.example                 # every secret, no values
 ├── agent.config.yaml            # owner-editable settings (spec: Product variables)
-├── kb/                          # knowledge base (spec: Knowledge base)
-│   ├── profile.md  experience.md  status.md  skills.md  faq.md  boundaries.md
+├── kb/                          # knowledge base (spec: Knowledge base); gitignored, private
+│   ├── profile.md  status.md  experience.md  skills.md  faq.md  boundaries.md
 │   └── projects/*.md
+├── kb.example/                  # same layout, made-up content; used by tests
 ├── assets/audio/                # generated clips: apology, fillers, busy (PCM16)
 ├── migrations/                  # 0001_init.sql, 0002_…sql
 ├── scripts/
@@ -366,9 +367,9 @@ This is configured as the number's fallback URL in the Twilio console. It return
 ### 8.2 Prompt layout and caching
 `system` is a list of blocks in this fixed order:
 
-1. **Instructions:** persona, guardrails, voice style rules, tool usage. A static file, `src/voice_agent/core/prompts/instructions.md`.
-2. **Knowledge base:** all `kb/` files concatenated in a fixed order with headers, read once at startup. **`cache_control: {"type": "ephemeral"}` goes on this block.**
-3. **Session context:** today's date, caller name or "unknown", last-session summary or none, anonymous yes/no. Not cached, and placed after the breakpoint so it can change per session without invalidating the cache.
+1. **Instructions:** persona, guardrails, voice style rules, tool usage. A static file, `src/voice_agent/core/prompts/instructions.md`, with `{owner_name}`, `{tone}`, `{do_not_discuss}` and `{max_sentences}` filled in once at startup. A missing or unused placeholder fails startup.
+2. **Knowledge base:** all `kb/` files joined in a fixed order (featured-projects line, profile, status, experience, projects with featured first, skills, faq, boundaries), read once at startup. **`cache_control: {"type": "ephemeral"}` goes on this block.** Front matter (`updated:` in status.md; `featured:` and `link:` in projects) becomes plain text, with links rewritten as spoken ("voice dash agent"). A missing core file, an unknown front-matter key or a stray file fails startup.
+3. **Session context:** today's date, caller name or "unknown" (a name failing the name check counts as unknown), last-session summary or none, anonymous yes/no, and an "as of <date>" note when status.md is older than `status_stale_days`. Not cached, and placed after the breakpoint so it can change per session without invalidating the cache.
 
 - Tools (`save_message`, `save_caller_details`, `end_session`) render before `system`. The list is static and in a fixed order, so it stays inside the cached prefix.
 - Silent cache-breakers to avoid: timestamps or caller data in blocks 1–2, and non-deterministic KB file ordering. Log `usage.cache_read_input_tokens` on every turn, and treat a zero after the first turn of a session as a bug.
