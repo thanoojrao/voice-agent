@@ -165,6 +165,18 @@ class Refused:
 LlmEvent = TextDelta | ToolCall | Done | Refused
 
 
+class ProviderError(Exception):
+    """A provider call failed. Providers translate their vendor's errors into this, so the
+    core decides on retries without knowing any vendor (design §8.5).
+
+    `retryable`: connection errors, rate limits and 5xx are; bad requests and auth are not.
+    """
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class LanguageModel(Protocol):
     def stream_reply(
         self, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]

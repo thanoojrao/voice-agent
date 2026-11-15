@@ -156,7 +156,8 @@ class FakeSTT:
 @dataclass
 class Reply:
     """One scripted model reply: the events to stream, with an optional pause before each
-    event (to test fillers and barge-in), or an exception to raise instead."""
+    event (to test fillers and barge-in), then an optional exception. An exception with no
+    events fails before anything streams; after events, it fails mid-reply."""
 
     events: Sequence[LlmEvent] = ()
     delay_s: float = 0.0
@@ -184,12 +185,12 @@ class FakeLLM:
         if not self.replies:
             raise AssertionError("FakeLLM ran out of scripted replies")
         reply = self.replies.pop(0)
-        if reply.raises:
-            raise reply.raises
         for event in reply.events:
             if reply.delay_s:
                 await asyncio.sleep(reply.delay_s)
             yield event
+        if reply.raises:
+            raise reply.raises
 
     async def summarize(self, transcript: str) -> str:
         self.summarized.append(transcript)
