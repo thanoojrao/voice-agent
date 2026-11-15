@@ -1,6 +1,6 @@
 # Voice Agent — Technical Design (v0)
 
-Status: draft for v0 · Last updated: 2026-11-14 (build step 2 in progress)
+Status: draft for v0 · Last updated: 2026-11-15 (build step 2 done)
 The product spec (use cases, decisions, settings) is kept separately and is the source of truth for *what*; this doc covers *how*. Spec references such as "D30" or "UC-8" point to it.
 
 This document turns the product spec into code structure. When the two disagree, the spec wins and this doc gets fixed.
@@ -67,8 +67,8 @@ voice_agent/
 │   │   └── constants.py         # spec: "Constants in code (v0)"
 │   ├── core/
 │   │   ├── interfaces.py        # ChannelAdapter, SessionCallbacks, STT/LLM/TTS, Storage, Notifier
-│   │   ├── session.py           # Session: one conversation, owns the turn state machine
-│   │   ├── registry.py          # active sessions, concurrency + daily caps
+│   │   ├── session.py           # Session: one call: inbox loop, barge-in, timers, storage
+│   │   ├── registry.py          # admission + caps, stream tokens, live sessions, shutdown
 │   │   ├── turn.py              # one agent turn: LLM stream → sentences → TTS → audio
 │   │   ├── sentences.py         # streaming sentence splitter
 │   │   ├── bargein.py           # backchannel filter
@@ -95,7 +95,7 @@ voice_agent/
 │       ├── routes.py            # /admin pages, HTTP Basic auth
 │       └── templates/*.html
 └── tests/
-    ├── fakes/                   # FakeVoiceAdapter, FakeSTT, FakeLLM, FakeTTS, MemoryStorage
+    ├── fakes/                   # FakeVoiceAdapter, FakeSTT, FakeLLM, FakeTTS, FakeNotifier
     ├── unit/
     └── integration/             # full sessions through the core on fakes
 ```
@@ -145,7 +145,9 @@ class SessionCallbacks(Protocol):  # implemented by core.Session, called by adap
     async def on_session_end(self, reason: str) -> None: ...
 ```
 
-The adapter calls `registry.start_session(SessionStart, adapter)` and gets back the `SessionCallbacks` to feed. These correspond to the spec's `on_session_start` and `on_audio`.
+The adapter calls `registry.admit(channel, address)` from its webhook, then `registry.start_session(token, SessionStart, adapter)` when the audio stream opens, and gets back the `SessionCallbacks` to feed (§5). These correspond to the spec's `on_session_start` and `on_audio`.
+
+Providers report failures as the core's own `ProviderError(retryable=...)`, so the core decides retries without knowing any vendor's exception types (§8.5).
 
 ### 4.3 Providers
 
@@ -196,7 +198,7 @@ class Storage(Protocol):
     async def mark_message_notified(self, message_id: int) -> None: ...
     async def count_sessions_since(
         self, since: datetime, caller_id: int | None = None
-    ) -> int: ...  # the core decides when "today" starts
+    ) -> int: ...  # the registry counts a rolling 24 hours
 
 
 class Notifier(Protocol):
@@ -216,10 +218,11 @@ sequenceDiagram
     participant Core as core.Session
     Caller->>Twilio: dials number
     Twilio->>API: POST /twilio/voice (From, CallSid, signature)
-    API->>API: verify signature, blocklist, caps, concurrency
+    API->>API: verify signature
+    API->>Core: registry.admit(channel, from) → Slot or Refusal
     API-->>Twilio: TwiML <Connect><Stream url=wss…/twilio/stream> + <Parameter> from, token
     Twilio->>API: WS connect → "connected", "start" (customParameters)
-    API->>Core: registry.start_session(SessionStart, adapter)
+    API->>Core: registry.start_session(token, SessionStart, adapter)
     Core-->>Caller: opening line (TTS → adapter.send_audio)
     loop each turn
         Twilio->>API: "media" frames (μ-law)
@@ -227,21 +230,33 @@ sequenceDiagram
         Core-->>Caller: reply audio, "mark" checkpoints
     end
     Core->>API: adapter.end_session() (close WS → call ends)
-    Core->>Core: summarize (background), store, done
+    Core->>Core: summarize, store, done (in the session's own task)
 ```
 
-**Start of a session (`registry.start_session`)**
-1. `get_or_create_caller(channel, address)`. A `None` address creates a one-off anonymous caller row (spec D30).
-2. `create_session(...)`, then open the STT stream.
-3. Build the session context: caller name if known, last session's summary if under 90 days old, anonymous flag, today's date.
+**Admission (`registry.admit`, from the webhook)**
+1. A number on `blocked_numbers` → `BLOCKED` (the adapter rejects without answering).
+2. Concurrency: live sessions *plus admitted calls whose stream hasn't opened yet* must stay under `max_concurrent_sessions`. Counting the waiting ones stops two calls ringing at once from both taking the last place. Check-and-reserve runs under a lock.
+3. `daily_session_cap` and `per_caller_sessions_per_day`, counted over a **rolling 24 hours** (no timezone to get wrong, no burst at midnight), waiting slots included. Withheld numbers can't be told apart, so only the shared caps apply to them.
+4. Pass → a `Slot`. Its random `token` is the one-time stream token (§7.1): single use, void after 60 s, and it must match the channel and number that were admitted. Any refusal other than `BLOCKED` → the busy clip.
+
+**Start (`registry.start_session`, when the stream opens)** consumes the slot, creates the `Session` through a factory that `app/main.py` passes in, and runs it as a task. An unknown, used, expired or mismatched token raises `AdmissionError`, and the adapter closes the socket.
+
+**`Session.run()`**
+1. `get_or_create_caller(channel, address)`. A `None` address creates a one-off anonymous caller row (spec D30). The row is read *before* `create_session`, so `session_count == 0` means a first-time caller.
+2. `last_session(...)`, then `create_session(...)`, then open the STT stream.
+3. Build the session context: caller name if known, last session's summary if under 90 days old, anonymous flag, today's date. The tool list depends on the adapter's capabilities.
 4. Speak the greeting (§8.4). Name question only in a caller's first session, and every time for anonymous callers (spec: ask once; if they decline, don't ask again).
+5. Loop until there's an end reason (§6.1).
 
-**End of a session.** Triggered by the `end_session` tool, the silence timeout, the `max_session_min` limit, the caller hanging up (WS `stop`), or a fatal provider failure.
-1. Cancel in-flight LLM/TTS, close STT.
-2. Close the adapter if it's still open.
-3. In the background: `summarize` the transcript (Haiku, non-streaming), then `storage.end_session(reason, summary)`.
+**End of a session.** Reasons: `goodbye` / `abuse` / `limit` (the `end_session` tool), `silence`, `limit` (hard time limit), `caller_hangup`, `shutdown` (server stopping), `error` (provider failure).
+1. Stop any turn still running and store what the caller heard. Don't send `clear` if the caller hung up.
+2. Close STT.
+3. Hang up through `adapter.end_session()`, unless the caller already did.
+4. `summarize` the transcript (Haiku, non-streaming), only if the caller said something, then `storage.end_session(reason, summary)`. This runs in the session's own task, so it never delays another call.
 
-Turns are already stored live, so a crash during step 3 loses only the summary.
+On shutdown, the registry stops admitting, sends every live session `on_session_end("shutdown")` so it ends the normal way, and cancels any still running after 10 s.
+
+Turns are stored as they happen, so a crash loses at most the summary.
 
 ---
 
@@ -265,6 +280,13 @@ stateDiagram-v2
     Ending --> [*]
 ```
 
+How the code maps to this:
+- **`Session` has two states, idle and in a turn.** Thinking, Speaking and Interrupted live inside `Turn` (§6.2). Every input (STT events, a turn finishing, a hang-up) goes through one inbox and is handled in order by the session loop, and timers are deadlines checked by the same loop. A barge-in and a turn ending at the same moment can't race.
+- **Fixed lines are turns too.** The greeting, "Are you still there?" and the silence goodbye run as turns driven by a one-line scripted model (no LLM call, no filler). They get marks, barge-in and history like any reply.
+- **Silence** (only while idle and the caller isn't mid-turn): `silence_prompt_s` → "Are you still there?" once; `silence_hangup_s` more → a goodbye line, then end with `silence`. Any caller turn resets it.
+- **Time limit:** at `max_session_min`, "(Note: the call has reached its time limit.)" is added to the caller's side of the history and the model gets a turn (straight away if idle, else right after the current turn). `instructions.md` tells it to wrap up and call `end_session(limit)`. 60 s later the session ends regardless.
+- **Interrupting a goodbye** (the caller cuts in after `end_session` was called) cancels the hang-up, and the call goes on.
+
 **Mapping Flux events.** Flux emits turn events (StartOfTurn, EagerEndOfTurn, TurnResumed, EndOfTurn, transcript updates). v0 maps:
 
 | Flux | Our `SttEvent` | Used for |
@@ -278,29 +300,35 @@ stateDiagram-v2
 ### 6.2 One agent turn (`core/turn.py`)
 
 ```
-TurnEnded(transcript)
-  → history.append(user: transcript); storage.add_turn(caller turn)
-  → start filler timer (FILLER_AFTER_MS)
-  → llm.stream_reply(system, history, tools)
-       TextDelta  → sentences.feed(delta) → each full sentence → tts.say(sentence)
-       ToolCall   → handle (§8.3), feed result back, continue the stream
-       Refused    → speak a fixed safe line, end turn
-       Done       → sentences.flush() → tts.say(rest)
-  → tts.audio() chunks → adapter.send_audio(pcm); adapter.mark(f"w{n}") at word boundaries
-  → first chunk: cancel filler timer, record latency_ms
-  → last mark played → history.append(assistant: spoken text); storage.add_turn(agent turn)
+caller's words already in history (the session added them and stored the caller row)
+turn.start()
+  think:   llm.stream_reply(system, history, tools)
+             TextDelta → sentences.feed(delta) → each full sentence → history + tts.say()
+             ToolCall  → collected; after Done, run them (§8.3) and make the next request
+             Refused   → speak the fixed safe line, end
+             Done      → sentences.flush() → tts.say(rest); tts.finish()
+  play:    tts.audio() chunks → adapter.send_audio(pcm); adapter.mark("t{turn}.w{n}")
+             first chunk: record latency_ms
+             after the last chunk: adapter.mark("t{turn}.end")
+  filler:  no reply audio after FILLER_AFTER_MS → play one filler clip
+wait for "t{turn}.end" to echo back → TurnResult
 ```
 
-- The LLM, TTS and playback steps run as concurrent asyncio tasks, connected by queues. Cancelling the turn cancels the task group.
+- think, play and filler run as concurrent asyncio tasks (a `TaskGroup` for think and play). Cancelling the turn cancels all of them. One lock serialises sends, so filler and reply audio never interleave.
+- **The turn waits for its final mark**, since Twilio receives audio much faster than it plays it, and a barge-in during playback still has to trim. The wait is capped at the audio still to play plus `mark_grace_ms` (2 s), so a lost echo or an adapter that doesn't echo can't hang the call.
+- **The turn doesn't touch storage.** It returns a `TurnResult`: outcome (completed / interrupted / failed), the text the caller heard, `latency_ms`, the tool calls with their results, the filler played (so the next turn picks a different one), and `end_reason`. The session writes the caller, tool and agent rows, so one place owns turn numbering.
+- **Tool calls** in one response go into one assistant message, and their results into the next user message, as the API requires. At most `MAX_TOOL_ROUNDS` (3) requests per turn may run tools. Calls beyond that get an `is_error` result ("answer without tools") and the turn ends. Once `end_session` has run, the turn makes no further request: the closing line was already said.
+- **Refusal** speaks a fixed line: "Sorry, I can't help with that one, but I can take a message for the real me."
 - **Sentence splitter.** Splits on `.?!` followed by whitespace, but not after common abbreviations ("e.g.", "Dr.", version numbers). It flushes a long clause at a comma or dash after about 200 characters, so the first audio is never stuck behind a long sentence.
-- **Filler.** If the timer fires before the first TTS chunk, play a random filler clip. TTS audio queued meanwhile plays after it. Fillers never enter `history`.
-- **Latency.** `latency_ms` is measured from `TurnEnded` to the first audio chunk sent to the adapter, and stored on the agent turn.
+- **Filler.** If the timer fires before the first TTS chunk, play a random filler clip, never the same one twice in a row. TTS audio queued meanwhile plays after it. Fillers never enter `history`.
+- **Latency.** `latency_ms` is measured from the turn's start (right after `TurnEnded`) to the first reply audio sent to the adapter. A filler doesn't count. It's stored on the agent turn.
 
 ### 6.3 Knowing what the caller actually heard
 
-Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*. The Twilio adapter sends `mark` messages after each word's audio, and Twilio echoes them back as each one finishes playing. Cartesia's word timestamps tell us which word ends at which byte offset.
+Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*. After each audio chunk the turn sends a `mark` named with the number of words sent so far, and Twilio echoes it back once that audio has played. Cartesia's word timestamps say how many words each chunk holds. A chunk is a few words, which is precise enough for trimming and sends far fewer marks than one per word.
 
-- `on_mark_played("w17")` means the caller has heard up to word 17.
+- `on_mark_played("t4.w17")` means the caller has heard 17 words of turn 4. The turn number makes a late echo from an earlier turn harmless.
+- The count comes from Cartesia's words, while history counts whitespace-separated words. Where they differ ("3.5", say), trimming can be off by a word. To check on a real call.
 - On interruption, the spoken text is the words up to the last played mark. History stores only that text, ending in "—" so the model knows it was cut off, and the turn row gets `interrupted = 1` (spec: Interruptions). Tool calls in the turn are kept, since they ran either way.
 - `core/history.py` also keeps the shape the LLM API expects: it starts with a placeholder user message ("(The call has connected.)") before the greeting, and roles alternate (back-to-back caller turns are merged).
 
@@ -311,7 +339,8 @@ Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*
   - `BACKCHANNEL` (only listening noises such as `mm-hm, uh-huh, yeah, okay, right, sure, got it`): keep speaking. The transcript keeps growing, so the next update is checked again ("yeah" → "yeah but wait").
   - `SPEECH`: interrupt. `adapter.clear_audio()` (Twilio `clear`), cancel the LLM and TTS tasks, trim history (§6.3), go to Listening.
 - A noise with no transcribed words (`NOTHING`) never interrupts.
-- If the caller's turn ends as only a backchannel while the agent is speaking, the turn is dropped, not answered.
+- If the caller's turn ends as only a backchannel while the agent is speaking, the turn is dropped, not answered. While idle, the same words are answered ("okay" may be a real reply).
+- A `TurnEnded` with real words while a turn is running interrupts it too, in case no interim `Words` arrived first.
 - The 300 ms acceptance target is measured from Flux's first-word event to the `clear` being sent. It's the first number to check on a real call.
 - **Possible later improvement.** The word list can't read context ("Right." as an answer vs. as a listening noise) or phrasing it doesn't list ("makes sense"). If real calls show misses of that kind, keep the word list as the instant first check and send only unclear cases to a fast decision model (a "System One" model such as TypeSafe AI's Jev) behind the same `classify()` signature, falling back to the word list if it doesn't answer within about 100 ms. Measure its round-trip latency against the 300 ms budget first. It reads text only, so tone ("okay." meaning "stop") would still need an audio timing model.
 
@@ -322,10 +351,10 @@ Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*
 ### 7.1 HTTP webhook `POST /twilio/voice`
 1. Validate `X-Twilio-Signature` with the Twilio helper library's request validator against the public URL. Invalid → 403.
 2. Normalize `From`. Empty, `anonymous`, `restricted` or `unknown` → `None`.
-3. Reject or decline:
-   - Number in `blocked_numbers` → `<Reject/>`.
-   - Daily cap, per-caller cap or concurrency limit hit → `<Play>` the busy clip, then `<Hangup/>`. The busy clip is served as a static WAV at `/static/audio/busy.wav`.
-4. Mint a one-time stream token (random, 60 s TTL, kept in memory).
+3. `registry.admit("twilio", from)` (§5):
+   - `BLOCKED` → `<Reject/>`.
+   - Any other refusal (concurrency, daily cap, per-caller cap) → `<Play>` the busy clip, then `<Hangup/>`. The busy clip is served as a static WAV at `/static/audio/busy.wav`.
+4. A `Slot` → its `token` is the one-time stream token (random, single use, 60 s, held by the registry).
 5. Respond with TwiML:
    ```xml
    <Response>
@@ -341,7 +370,7 @@ Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*
 
 ### 7.2 WebSocket `/twilio/stream`
 - `connected` → ignore.
-- `start` → read `callSid`, `streamSid`, `customParameters.from`, `customParameters.token`. Validate and consume the token, otherwise close the socket. Then `registry.start_session(...)`.
+- `start` → read `callSid`, `streamSid`, `customParameters.from`, `customParameters.token`. `registry.start_session(token, ...)` checks and consumes the token. On `AdmissionError`, close the socket.
 - `media` → base64 μ-law → PCM16 → `session.on_audio`.
 - `mark` → `session.on_mark_played(name)`.
 - `stop` / socket closed → `session.on_session_end("caller_hangup")`.
@@ -382,12 +411,12 @@ All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choic
 | --- | --- | --- |
 | `save_message` | `{body: string, contact?: string}` | Who it's from always comes from the caller record, never the model: the saved name (set via `save_caller_details`) and the number the call came from. `contact` is only an extra way to reach them (an email, another number). An anonymous caller has no number, so a call without `contact` returns an `is_error` asking the model to ask; `"declined"` is accepted. Then `storage.save_message`, `notifier.message_left(...)` immediately, and `mark_message_notified`. Return `{"saved": true}`. If the email fails the message stays saved (unsent on the admin page) and the result is still `saved`; if saving fails, an `is_error` result. |
 | `save_caller_details` | `{name?: string, company?: string, reason?: string}` | Used when the caller gives their name (answering the name question, or offering it unprompted), corrects a name we have wrong ("Actually, I'm not Sam, I'm Alex"), or mentions their company or reason for calling. `storage.set_caller_details`; omitted fields keep their stored value. Rejects a name that fails the name check (§8.4) with an `is_error` result. Return `{"ok": true}`. |
-| `end_session` | `{reason: "goodbye" \| "abuse" \| "limit"}` | Set the session to end once the current spoken text finishes playing. Return `{"ok": true}`. |
+| `end_session` | `{reason: "goodbye" \| "abuse" \| "limit"}` | Set the session to end once the current spoken text finishes playing. The turn makes no further LLM request. Return `{"ok": true}`. |
 
 - `end_session` is only offered when the adapter has the `END_SESSION` capability (D31). The tool list is otherwise fixed.
 - The model never sends a caller or session ID. Handlers get them from the session's `ToolContext`.
 - Because of eager input streaming, the accumulated tool input can be incomplete. Parse it, validate against the schema, and on failure return an `is_error` tool result rather than running the handler.
-- The tool loop runs inside one agent turn. After a `tool_use`, append the assistant content and the `tool_result`, then continue streaming. Text spoken before and after the tool call flows to TTS as usual.
+- The tool loop runs inside one agent turn (§6.2). After a `tool_use`, append the assistant content and the `tool_result`, then make the next request. Text spoken before and after the tool call flows to TTS as usual. At most 3 tool rounds per turn.
 - The instructions tell the model to read the message back and get a "yes" before calling `save_message`, and to say its closing line before calling `end_session`.
 
 ### 8.4 Greeting
@@ -401,11 +430,13 @@ All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choic
 
 - **Name check.** A saved name is used in the greeting only if it looks like a real name: 1–3 words, at most 40 characters, letters plus spaces, hyphens and apostrophes. Otherwise the caller gets the plain greeting. Names come from speech recognition, so a mangled one is possible.
 - **Wrong person.** If the caller says the name is wrong (a shared or recycled number), the model asks for their name and calls `save_caller_details` (§8.3).
-- **Warm intro.** When a returning caller has a summary from the last 90 days and `warm_intro` is on, a short separate LLM request (just the summary, not the full conversation) writes one line that offers the last topic ("Last time we talked about the voice agent. Want to pick that up?"). The name was already said, so the line doesn't repeat it. It starts generating while the greeting plays and is spoken right after it.
+- **Warm intro.** When a returning caller has a summary from the last 90 days and `warm_intro` is on, a short separate LLM request (just the summary, not the full conversation) writes one line that offers the last topic ("Last time we talked about the voice agent. Want to pick that up?"). The name was already said, so the line doesn't repeat it. It starts generating while the greeting plays and is spoken right after it. *Not built yet (step 7): until then the model just has the summary in its context.*
 
 ### 8.5 Errors and the fallback clip
-- Retry once on `anthropic.APIConnectionError`, `RateLimitError` and 5xx `APIStatusError`, and on a first-token timeout (`PROVIDER_TIMEOUT_S`).
-- On a second failure, play the apology clip, end the session, and send `notifier.alert`. Deepgram and Cartesia failures take the same path.
+- Providers translate their errors into `ProviderError(retryable=...)` (`core/interfaces.py`). For Claude, `APIConnectionError`, `RateLimitError` and 5xx `APIStatusError` are retryable; bad requests and auth errors aren't.
+- **Retry once per turn, and only if the failed request hasn't said anything yet.** Once a sentence has gone to TTS, a retry would repeat what the caller already heard. A request that fails after a tool round but before speaking is still retried. No event within `PROVIDER_TIMEOUT_S` (5 s, checked between every streamed event) counts as retryable.
+- TTS and adapter failures aren't retried: retrying TTS halfway through an utterance isn't worth the complexity.
+- On a failure that isn't retried: the turn clears the audio, plays the apology clip and returns `FAILED`. The session then sends `notifier.alert` and ends with `error`. If the STT stream drops, the session plays the apology and alerts the same way.
 - The SDK has its own default retries (`max_retries=2`, a 10 min timeout), which are wrong for live voice. Construct the client with `max_retries=0` and a short timeout so `turn.py` owns the retry policy.
 
 ---
@@ -519,7 +550,7 @@ v0 has no hot reload. Changing config or the knowledge base means a restart or r
 | Level | What | How |
 | --- | --- | --- |
 | Unit | sentence splitter, backchannel filter, history trimming from marks, greeting/warm-intro rules, TwiML builders, μ-law codec, caps logic | plain pytest |
-| Integration (core) | full sessions: greeting → question → answer; returning-caller greeting; name saved via `save_caller_details`; barge-in mid-answer; filler; `save_message` + email; `end_session`; anonymous caller; provider failure → apology clip | `FakeVoiceAdapter` + `FakeSTT` (scripted events) + `FakeLLM` (scripted deltas/tool calls) + `FakeTTS` (timestamps) + in-memory SQLite + `FakeNotifier` |
+| Integration (core) | full sessions: greeting → question → answer; returning-caller greeting; name saved via `save_caller_details`; barge-in mid-answer; filler; `save_message` + email; `end_session`; anonymous caller; provider failure → apology clip | `FakeVoiceAdapter` + `FakeSTT` (scripted events) + `FakeLLM` (scripted deltas/tool calls) + `FakeTTS` (timestamps) + real SQLite on a temp file + `FakeNotifier`, wired through the registry with the real prompt from `kb.example/` (`tests/integration/test_calls.py`) |
 | Contract | each provider maps vendor events to our types correctly | recorded vendor messages replayed from fixtures |
 | Manual | real calls against the spec's acceptance list | the checklist, run on a phone |
 | Eval (later) | 30 KB questions, 10 out-of-scope, 10 injection | separate script against the real LLM with the real prompt |
@@ -531,12 +562,12 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 ## 16. Build order (thin slices)
 
 1. ✅ **Skeleton:** uv project, config loading, constants, migrations, storage, and the interfaces with their fakes. Tests pass on an empty core.
-2. **Core turn engine on fakes:** state machine, sentence splitter, history, barge-in, filler, tools. The integration tests are the definition of done.
+2. ✅ **Core turn engine on fakes:** state machine, sentence splitter, history, barge-in, filler, tools, plus the registry with its caps and the session summary. The integration tests are the definition of done.
 3. **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate.
 4. **Twilio adapter:** webhook, stream, marks and clear, fallback URL. First real call.
 5. **Messages and email:** `save_message` → Gmail.
 6. **Admin page.**
-7. **Warm intro, session summary, caps, anonymous handling, clips script.**
+7. **Warm intro, clips script.** (Caps, the session summary and anonymous handling were done in step 2.)
 8. **Run the acceptance checklist on real calls.** Tune latency.
 
 ---

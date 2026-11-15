@@ -2,7 +2,7 @@
 
 A phone agent that answers calls as an AI version of me. Callers can ask about my work, my projects and what I'm up to right now. They can also leave a message, which reaches me by email. It always says up front that it's an AI.
 
-> **Status:** early development. The project skeleton is done; the conversation engine is next. See the [build order](docs/technical-design.md#16-build-order-thin-slices).
+> **Status:** early development. The conversation engine is done and tested on fakes; real providers (Deepgram, Claude, Cartesia) are next. See the [build order](docs/technical-design.md#16-build-order-thin-slices).
 
 ## How it works
 
