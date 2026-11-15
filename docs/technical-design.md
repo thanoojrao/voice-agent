@@ -379,10 +379,12 @@ All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choic
 
 | Tool | Input schema | Handler |
 | --- | --- | --- |
-| `save_message` | `{name: string, contact: string, body: string}` | Validate the input. `storage.save_message`, then `notifier.message_left(...)` immediately, then `mark_message_notified`. Return `{"saved": true}`, or an `is_error` result on failure. |
+| `save_message` | `{body: string, contact?: string}` | Who it's from always comes from the caller record, never the model: the saved name (set via `save_caller_details`) and the number the call came from. `contact` is only an extra way to reach them (an email, another number). An anonymous caller has no number, so a call without `contact` returns an `is_error` asking the model to ask; `"declined"` is accepted. Then `storage.save_message`, `notifier.message_left(...)` immediately, and `mark_message_notified`. Return `{"saved": true}`. If the email fails the message stays saved (unsent on the admin page) and the result is still `saved`; if saving fails, an `is_error` result. |
 | `save_caller_details` | `{name?: string, company?: string, reason?: string}` | Used when the caller gives their name (answering the name question, or offering it unprompted), corrects a name we have wrong ("Actually, I'm not Sam, I'm Alex"), or mentions their company or reason for calling. `storage.set_caller_details`; omitted fields keep their stored value. Rejects a name that fails the name check (§8.4) with an `is_error` result. Return `{"ok": true}`. |
 | `end_session` | `{reason: "goodbye" \| "abuse" \| "limit"}` | Set the session to end once the current spoken text finishes playing. Return `{"ok": true}`. |
 
+- `end_session` is only offered when the adapter has the `END_SESSION` capability (D31). The tool list is otherwise fixed.
+- The model never sends a caller or session ID. Handlers get them from the session's `ToolContext`.
 - Because of eager input streaming, the accumulated tool input can be incomplete. Parse it, validate against the schema, and on failure return an `is_error` tool result rather than running the handler.
 - The tool loop runs inside one agent turn. After a `tool_use`, append the assistant content and the `tool_result`, then continue streaming. Text spoken before and after the tool call flows to TTS as usual.
 - The instructions tell the model to read the message back and get a "yes" before calling `save_message`, and to say its closing line before calling `end_session`.
