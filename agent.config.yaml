@@ -13,7 +13,7 @@ name_question: "Who am I speaking with?"
 tone: friendly, concise
 
 # Cartesia voice ID: your clone, or a stock voice if the clone doesn't sound right.
-voice_id: ""
+voice_id: "0216cc0e-7907-4ffa-9c06-db9bae57fa94"
 llm_model: claude-haiku-5-5
 
 # Timers and caps
