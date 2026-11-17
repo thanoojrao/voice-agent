@@ -1,6 +1,6 @@
 # Voice Agent — Technical Design (v0)
 
-Status: draft for v0 · Last updated: 2026-11-15 (build step 2 done)
+Status: draft for v0 · Last updated: 2026-11-17 (build step 3 done)
 The product spec (use cases, decisions, settings) is kept separately and is the source of truth for *what*; this doc covers *how*. Spec references such as "D30" or "UC-8" point to it.
 
 This document turns the product spec into code structure. When the two disagree, the spec wins and this doc gets fixed.
@@ -15,9 +15,9 @@ This document turns the product spec into code structure. When the two disagree,
 | Packaging | `uv` (Python version, deps, lockfile) |
 | Web framework | FastAPI + uvicorn (single worker — see §14) |
 | Voice pipeline | Custom, no framework. Cascaded STT → LLM → TTS |
-| STT | Deepgram Flux (streaming, turn detection built in) |
+| STT | Deepgram Flux (streaming, turn detection built in), over a raw WebSocket |
 | LLM | Claude Haiku 5.5 (`claude-haiku-5-5`) via the official `anthropic` Python SDK |
-| TTS | Cartesia (streaming, cloned voice with stock fallback) |
+| TTS | Cartesia Sonic 3.6 over a raw WebSocket (streaming, cloned voice with stock fallback) |
 | Channel (v0) | Twilio Programmable Voice + bidirectional Media Streams |
 | Database | SQLite via `aiosqlite`, hand-written SQL, numbered migration files |
 | Admin UI | Server-rendered Jinja2 templates in the same FastAPI app, plain CSS |
@@ -59,7 +59,8 @@ voice_agent/
 ├── assets/audio/                # generated clips: apology, fillers, busy (PCM16)
 ├── migrations/                  # 0001_init.sql, 0002_…sql
 ├── scripts/
-│   └── generate_clips.py        # render clips with the current voice_id
+│   ├── generate_clips.py        # render clips with the current voice_id
+│   └── try_pipeline.py          # dev: real Flux → Claude → Cartesia, no phone; timings + WAVs
 ├── src/voice_agent/
 │   ├── app/
 │   │   ├── main.py              # FastAPI app, startup wiring, routes mounting
@@ -71,9 +72,11 @@ voice_agent/
 │   │   ├── registry.py          # admission + caps, stream tokens, live sessions, shutdown
 │   │   ├── turn.py              # one agent turn: LLM stream → sentences → TTS → audio
 │   │   ├── sentences.py         # streaming sentence splitter
+│   │   ├── speech.py            # what the caller hears: <spell> tags → letters
 │   │   ├── bargein.py           # backchannel filter
 │   │   ├── history.py           # conversation history + trimming on interruption
 │   │   ├── prompt.py            # system prompt assembly (KB + instructions + session context)
+│   │   ├── prompts/instructions.md  # block 1 of the system prompt
 │   │   ├── tools.py             # save_message, save_caller_details, end_session + handlers
 │   │   ├── greeting.py          # opening line, warm intro, name question
 │   │   └── clips.py             # loads + checks apology and filler clips (busy is served by Twilio)
@@ -96,7 +99,7 @@ voice_agent/
 │       └── templates/*.html
 └── tests/
     ├── fakes/                   # FakeVoiceAdapter, FakeSTT, FakeLLM, FakeTTS, FakeNotifier
-    ├── unit/
+    ├── unit/                    # incl. test_no_personal_data.py (no private email in the repo)
     └── integration/             # full sessions through the core on fakes
 ```
 
@@ -147,6 +150,8 @@ class SessionCallbacks(Protocol):  # implemented by core.Session, called by adap
 
 The adapter calls `registry.admit(channel, address)` from its webhook, then `registry.start_session(token, SessionStart, adapter)` when the audio stream opens, and gets back the `SessionCallbacks` to feed (§5). These correspond to the spec's `on_session_start` and `on_audio`.
 
+`send_audio(b"")` must be a no-op: a TTS chunk can carry word timings with no audio (§9), and the turn still sends it so the mark after it is placed.
+
 Providers report failures as the core's own `ProviderError(retryable=...)`, so the core decides retries without knowing any vendor's exception types (§8.5).
 
 ### 4.3 Providers
@@ -167,6 +172,7 @@ class LanguageModel(Protocol):
         self, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]
     ) -> AsyncIterator[LlmEvent]: ...  # TextDelta, ToolCall, Done, Refused
     async def summarize(self, transcript: str) -> str: ...
+    async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None: ...
 
 
 class TextToSpeech(Protocol):
@@ -245,8 +251,9 @@ sequenceDiagram
 1. `get_or_create_caller(channel, address)`. A `None` address creates a one-off anonymous caller row (spec D30). The row is read *before* `create_session`, so `session_count == 0` means a first-time caller.
 2. `last_session(...)`, then `create_session(...)`, then open the STT stream.
 3. Build the session context: caller name if known, last session's summary if under 90 days old, anonymous flag, today's date. The tool list depends on the adapter's capabilities.
-4. Speak the greeting (§8.4). Name question only in a caller's first session, and every time for anonymous callers (spec: ask once; if they decline, don't ask again).
-5. Loop until there's an end reason (§6.1).
+4. Start warming the model's prompt cache in the background (§8.2), so it's ready by the first answer.
+5. Speak the greeting (§8.4). Name question only in a caller's first session, and every time for anonymous callers (spec: ask once; if they decline, don't ask again).
+6. Loop until there's an end reason (§6.1).
 
 **End of a session.** Reasons: `goodbye` / `abuse` / `limit` (the `end_session` tool), `silence`, `limit` (hard time limit), `caller_hangup`, `shutdown` (server stopping), `error` (provider failure).
 1. Stop any turn still running and store what the caller heard. Don't send `clear` if the caller hung up.
@@ -286,6 +293,7 @@ How the code maps to this:
 - **Silence** (only while idle and the caller isn't mid-turn): `silence_prompt_s` → "Are you still there?" once; `silence_hangup_s` more → a goodbye line, then end with `silence`. Any caller turn resets it.
 - **Time limit:** at `max_session_min`, "(Note: the call has reached its time limit.)" is added to the caller's side of the history and the model gets a turn (straight away if idle, else right after the current turn). `instructions.md` tells it to wrap up and call `end_session(limit)`. 60 s later the session ends regardless.
 - **Interrupting a goodbye** (the caller cuts in after `end_session` was called) cancels the hang-up, and the call goes on.
+- **Goodbye hold.** After a goodbye has played, the line stays open for `goodbye_hold_s` (3 s) before the session hangs up, so "oh, one more thing" isn't cut off. Real words in that time cancel the hang-up and get an answer; silence, a cough or a backchannel lets the call end (a backchannel restarts the 3 s). Silence prompts don't run during the hold; the hard limit does. `abuse` hangs up at once, with no hold. Most callers hang up themselves first.
 
 **Mapping Flux events.** Flux emits turn events (StartOfTurn, EagerEndOfTurn, TurnResumed, EndOfTurn, transcript updates). v0 maps:
 
@@ -295,7 +303,7 @@ How the code maps to this:
 | EndOfTurn | `TurnEnded(transcript)` | start the agent turn |
 | EagerEndOfTurn / TurnResumed | ignored in v0 | later latency optimization (spec) |
 
-> Verify the exact event names and payload fields against Deepgram's current Flux docs when writing `deepgram_flux.py`. Nothing outside that file depends on them.
+Confirmed against Deepgram's docs and a live run (step 3). `Update` messages also arrive about every 0.25 s between turns, so only a turn's updates become `Words`. On clean audio Flux sometimes ends a turn at a pause mid-thought ("Okay, thanks." | "Can I leave a message?"); barge-in and the goodbye hold absorb that, and `eot_threshold` is to be tuned on real calls (§17).
 
 ### 6.2 One agent turn (`core/turn.py`)
 
@@ -303,7 +311,7 @@ How the code maps to this:
 caller's words already in history (the session added them and stored the caller row)
 turn.start()
   think:   llm.stream_reply(system, history, tools)
-             TextDelta → sentences.feed(delta) → each full sentence → history + tts.say()
+             TextDelta → sentences.feed(delta) → each full sentence → speakable() → history + tts.say()
              ToolCall  → collected; after Done, run them (§8.3) and make the next request
              Refused   → speak the fixed safe line, end
              Done      → sentences.flush() → tts.say(rest); tts.finish()
@@ -320,6 +328,7 @@ wait for "t{turn}.end" to echo back → TurnResult
 - **Tool calls** in one response go into one assistant message, and their results into the next user message, as the API requires. At most `MAX_TOOL_ROUNDS` (3) requests per turn may run tools. Calls beyond that get an `is_error` result ("answer without tools") and the turn ends. Once `end_session` has run, the turn makes no further request: the closing line was already said.
 - **Refusal** speaks a fixed line: "Sorry, I can't help with that one, but I can take a message for the real me."
 - **Sentence splitter.** Splits on `.?!` followed by whitespace, but not after common abbreviations ("e.g.", "Dr.", version numbers). It flushes a long clause at a comma or dash after about 200 characters, so the first audio is never stuck behind a long sentence.
+- **What's spoken is what's stored.** `speakable()` (§8.6) turns `<spell>` tags into letters before the sentence goes to history and TTS, so the words counted from the audio match the words in history.
 - **Filler.** If the timer fires before the first TTS chunk, play a random filler clip, never the same one twice in a row. TTS audio queued meanwhile plays after it. Fillers never enter `history`.
 - **Latency.** `latency_ms` is measured from the turn's start (right after `TurnEnded`) to the first reply audio sent to the adapter. A filler doesn't count. It's stored on the agent turn.
 
@@ -328,7 +337,7 @@ wait for "t{turn}.end" to echo back → TurnResult
 Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*. After each audio chunk the turn sends a `mark` named with the number of words sent so far, and Twilio echoes it back once that audio has played. Cartesia's word timestamps say how many words each chunk holds. A chunk is a few words, which is precise enough for trimming and sends far fewer marks than one per word.
 
 - `on_mark_played("t4.w17")` means the caller has heard 17 words of turn 4. The turn number makes a late echo from an earlier turn harmless.
-- The count comes from Cartesia's words, while history counts whitespace-separated words. Where they differ ("3.5", say), trimming can be off by a word. To check on a real call.
+- The count comes from Cartesia's words, while history counts whitespace-separated words. Where they differ ("3.5", say), trimming can be off by a word. On a live run (step 3) the two matched word for word, spelled letters included. Cartesia sends each word's timing *after* its audio, so the provider holds timings until the audio that covers them has arrived (§9).
 - On interruption, the spoken text is the words up to the last played mark. History stores only that text, ending in "—" so the model knows it was cut off, and the turn row gets `interrupted = 1` (spec: Interruptions). Tool calls in the turn are kept, since they ran either way.
 - `core/history.py` also keeps the shape the LLM API expects: it starts with a placeholder user message ("(The call has connected.)") before the greeting, and roles alternate (back-to-back caller turns are merged).
 
@@ -389,6 +398,7 @@ This is configured as the number's fallback URL in the Twilio console. It return
 - Client: `anthropic.AsyncAnthropic()`. The key comes from `ANTHROPIC_API_KEY`.
 - `model="claude-haiku-5-5"`, streaming via `client.messages.stream(...)`.
 - **Thinking off for live turns.** Use `thinking={"type": "disabled"}`, which Haiku 5.5 accepts at effort `high` or below. A spoken one-to-three-sentence answer from a small knowledge base doesn't benefit from thinking, and thinking adds latency before the first token. If evals show quality gaps, try adaptive thinking at `effort: "low"` and measure the latency cost.
+- `output_config={"effort": "low"}`. Measured on the dev script: time to first text 0.45–1.6 s on warm turns, from a home connection.
 - `max_tokens=1024`. Answers are deliberately short, and this leaves room for a tool call plus a sentence.
 - No `temperature`/`top_p` (rejected on current models).
 - Read response content by block `type`, never by position. Check `stop_reason`: `"refusal"` → speak a fixed safe line ("I can't help with that one — anything else about my work?"). Haiku 5.5 has no server-side refusal fallback.
@@ -402,10 +412,11 @@ This is configured as the number's fallback URL in the Twilio console. It return
 
 - Tools (`save_message`, `save_caller_details`, `end_session`) render before `system`. The list is static and in a fixed order, so it stays inside the cached prefix.
 - Silent cache-breakers to avoid: timestamps or caller data in blocks 1–2, and non-deterministic KB file ordering. Log `usage.cache_read_input_tokens` on every turn, and treat a zero after the first turn of a session as a bug.
-- The minimum cacheable prefix on Haiku 5.5 is 512 tokens, which the instructions plus knowledge base easily exceed.
+- The minimum cacheable prefix on Haiku 5.5 is 512 tokens, which the instructions plus knowledge base easily exceed. Measured: the cached prefix is about 11.6K tokens (tools ~0.9K, instructions ~1.8K, knowledge base ~9K).
+- **Prewarm.** The cache lasts 5 minutes, and a cold write made the first answer of a call take 1.7–5 s to start. So when a call connects, the session calls `llm.prewarm(system, tools)`: the same request with `max_tokens=0` and no streaming. The API writes the cache and returns with no output (only the write is billed, about $0.0014). It runs in the background while the greeting plays; a failure is logged and only makes the first answer slower. It must match a real request up to the breakpoint (tools, blocks 1–2, thinking, effort), so it's built by the same code. Measured: the first turn then reads the cache (first text 0.58 s).
 
 ### 8.3 Tools
-All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choice` left as `auto`. Forced tool choice isn't used.
+All tools use `strict: true`, with `tool_choice` left as `auto`. Forced tool choice isn't used. Strict mode rejects length limits (`maxLength` and similar), so the provider strips them from what it sends; `tools.py` still checks them. No eager input streaming: it only gets tool input sooner while a block is still being written, a tool can't run before its block ends anyway, and it would turn off the API's own check of the input.
 
 | Tool | Input schema | Handler |
 | --- | --- | --- |
@@ -415,7 +426,7 @@ All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choic
 
 - `end_session` is only offered when the adapter has the `END_SESSION` capability (D31). The tool list is otherwise fixed.
 - The model never sends a caller or session ID. Handlers get them from the session's `ToolContext`.
-- Because of eager input streaming, the accumulated tool input can be incomplete. Parse it, validate against the schema, and on failure return an `is_error` tool result rather than running the handler.
+- Every input is validated against the tool's own schema (limits included) before the handler runs; a failure returns an `is_error` tool result rather than running the handler. Tool calls are held until the reply ends, and a reply cut off at `max_tokens` or refused runs none of them.
 - The tool loop runs inside one agent turn (§6.2). After a `tool_use`, append the assistant content and the `tool_result`, then make the next request. Text spoken before and after the tool call flows to TTS as usual. At most 3 tool rounds per turn.
 - The instructions tell the model to read the message back and get a "yes" before calling `save_message`, and to say its closing line before calling `end_session`.
 
@@ -439,20 +450,37 @@ All tools use `strict: true` and `eager_input_streaming: true`, with `tool_choic
 - On a failure that isn't retried: the turn clears the audio, plays the apology clip and returns `FAILED`. The session then sends `notifier.alert` and ends with `error`. If the STT stream drops, the session plays the apology and alerts the same way.
 - The SDK has its own default retries (`max_retries=2`, a 10 min timeout), which are wrong for live voice. Construct the client with `max_retries=0` and a short timeout so `turn.py` owns the retry policy.
 
+### 8.6 Spelling things out (`core/speech.py`)
+Over the phone, an email address said once is easy to miss. The model decides **when** to spell, and code decides **how**:
+
+- The model writes the address normally and wraps what should be spelled in a tag: `That's <spell>name@example.com</spell>.` `instructions.md` says when: the first time it gives an address, when the caller asks to spell or repeat it, and when reading back an address the caller gave. Otherwise it just says it.
+- `speakable()` replaces the tag with letters the way a person reads them out: capitals one at a time, a pause (comma) every four letters, "double" for a pair, symbols as words (dot, dash, underscore, plus), "at" for "@", well-known domain parts (gmail, com, …) as words and anything else spelled. Stray or unclosed tags are removed, so the caller never hears "spell".
+- Nothing is spelled without a tag: if the model chooses not to spell, nothing overrides it. An untagged address is read by Cartesia, which says "@" as "at".
+- If the caller cuts in mid-spelling, history holds the letters they heard, and the model carries on from there (or starts over if asked).
+- The tag name matches Cartesia's own `<spell>` tag, so one that slipped through would still be spelled.
+
 ---
 
 ## 9. Cartesia (`providers/cartesia_tts.py`)
-- One WebSocket connection per session, reused across turns. One *context* per agent turn, so `say()` appends sentences to the same utterance with natural prosody across sentence breaks.
-- Output: raw PCM16 at the adapter's sample rate (8000 for Twilio), with word timestamps on.
-- `cancel()` cancels the context on interruption.
+Raw WebSocket to `wss://api.cartesia.ai/tts/websocket` (no SDK: the protocol is a few JSON messages, and barge-in needs the routing and timings an SDK hides). Model `sonic-3.6`; the key goes in an `X-API-Key` header and the version in `Cartesia-Version: 2026-08-14`, never in the URL.
+
+- **One connection for the whole app,** opened on first use and shared by every turn of every call; a reader task routes each message to its turn by `context_id`. A fresh handshake takes 400–600 ms, which would otherwise land on a turn. After a drop, turns in progress fail (the apology plays) and the next turn reconnects. Idle, it costs nothing (billing is per character), and an idle close between calls is logged at info. `app/main.py` closes it at shutdown.
+- **One context per agent turn.** Each sentence goes in with `continue: true` and a trailing space (transcripts are joined verbatim); `finish()` sends an empty transcript with `continue: false`. Sentences in one context are spoken as one utterance.
+- **Pauses.** A context expires about 1 s after its last audio (docs; a live probe still worked at 1.5 s). If both text and audio have been quiet for 0.5 s (a tool running), the next sentence starts a new context and its timings are shifted by the audio already received, so the turn keeps one timeline.
+- **Output:** `raw` / `pcm_s16le` at the adapter's rate (8000 for Twilio). μ-law would save one conversion but puts the phone's format in the core; converting is the adapter's job. `max_buffer_delay_ms: 0`, since the turn already sends whole sentences. Measured: first audio about 140–160 ms after a sentence is sent.
+- **Word timings** come in seconds from the start of the context, one word per message, after the audio they describe. Each is held until the audio received covers the word, then attached to that chunk; any left when the context ends come in a chunk with no audio (hence `send_audio(b"")` being a no-op, §4.2).
+- **Cancel** stops only text Cartesia hasn't started on; audio already being made still arrives, then `done`. So `cancel()` ends `audio()` at once and drops anything later for that turn.
+- **Errors:** handshake 429/5xx and `concurrency_limited` are retryable; 4xx (`voice_not_found`, `quota_exceeded`, …) aren't. If no `done` arrives 5 s after `finish()`, the turn fails. A connect that fails on the network is retried once over IPv4: from home, about half the IPv6 handshakes to Cartesia were reset, none over IPv4.
+- **Pronunciations.** `pronunciations` in `agent.config.yaml` maps a word to how it should be said (a sounds-like spelling or Cartesia IPA, e.g. Durgapur). The provider swaps them in just before sending, whole words in any case, so the model, history and transcripts keep the real spelling. Each side is one word, so word timings still line up.
 - `voice_id` comes from config. The cloned voice is the default and the stock voice is the fallback (spec D12).
 
-> Confirm the streaming/context API, the timestamp field names and support for 8 kHz PCM output in Cartesia's current docs when writing this file.
-
 ## 10. Deepgram Flux (`providers/deepgram_flux.py`)
-- One streaming connection per session, encoding `linear16`, `sample_rate` from the adapter.
-- Use the official SDK if it supports Flux; otherwise use the raw WebSocket API through `websockets`. Either way it stays inside this file.
-- Reconnect once on drop. A second drop goes down the fatal-provider-failure path (§8.5).
+- One streaming connection **per call** (unlike Cartesia): it's one continuous audio stream with its settings fixed in the URL, Flux keeps turn state across it, and it has no way to share a socket or keep one idle. Opening it while the greeting plays hides the handshake.
+- Raw WebSocket to `wss://api.deepgram.com/v2/listen` through `websockets`, key in an `Authorization: Token` header. The SDK's async Flux support was newer and thinner than the API, so it would add a dependency without saving code.
+- `model=flux-general-en`, `encoding=linear16`, `sample_rate` from the adapter, `eot_threshold` 0.7, `eot_timeout_ms` 5000, optional `keyterm`s. Eager end-of-turn is off in v0.
+- Audio goes out in 80 ms chunks (Deepgram's recommendation); the phone's 20 ms frames are collected first.
+- Reconnect once on drop; a turn in progress ends with the words heard so far. A second drop goes down the fatal-provider-failure path (§8.5). `close()` sends `CloseStream` and waits briefly for the last transcripts.
+- Measured on clean audio: `EndOfTurn` 110–370 ms after the speech ends.
 
 ---
 
@@ -519,7 +547,7 @@ Every turn is written as it completes (spec: dropped calls keep their transcript
 | Source | Holds | Loaded by |
 | --- | --- | --- |
 | `.env` | `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `TWILIO_AUTH_TOKEN` (signature check), `OWNER_EMAIL`, `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `ADMIN_PASSWORD`, `PUBLIC_BASE_URL` | `pydantic-settings` |
-| `agent.config.yaml` | the spec's Product variables (greeting, greeting_returning, name_question, voice_id, caps, silence timers, do_not_discuss, …) | pydantic model, validated at startup; bad config refuses to start |
+| `agent.config.yaml` | the spec's Product variables (greeting, greeting_returning, name_question, voice_id, caps, silence timers, do_not_discuss, …), plus `pronunciations` (§9) | pydantic model, validated at startup; bad config refuses to start |
 | `app/constants.py` | the spec's "Constants in code (v0)" | import |
 
 v0 has no hot reload. Changing config or the knowledge base means a restart or redeploy (spec D28).
@@ -539,6 +567,8 @@ v0 has no hot reload. Changing config or the knowledge base means a restart or r
 
 - **Single process, single uvicorn worker.** The session registry, stream tokens and concurrency count live in memory. Two workers would split them. One worker easily handles 2 concurrent sessions, since the work is I/O-bound.
 - **Docker.** One `Dockerfile` (python:3.13-slim + uv) and a volume mounted at `/app/data` for `agent.db`. The host must be always on, with a persistent disk, in a US region (spec D26).
+- **Without a phone.** `uv run python scripts/try_pipeline.py --say "…" "…"` (or `--wav`) runs real Flux → Claude → Cartesia, prints per-turn latency and cache tokens, and saves each reply as a WAV. `--record` saves the raw provider messages (no audio, no keys); `--cold` skips the prewarm.
+- **Time zone.** The session's clock is New York time. Windows Python has no time-zone data, so the app needs the `tzdata` package.
 - **Local development.** `uv run uvicorn …` plus a tunnel (ngrok or Cloudflare Tunnel). Point the Twilio number's voice webhook at `https://<tunnel>/twilio/voice` and set `PUBLIC_BASE_URL` to match, since signature validation needs the exact public URL.
 - **Backups.** A daily `sqlite3 agent.db ".backup …"` copy off-box (spec: Proposed).
 - **Logging.** Structured JSON lines carrying `session_id` on every line: per-turn latency, cache read tokens, provider errors, state transitions.
@@ -551,7 +581,9 @@ v0 has no hot reload. Changing config or the knowledge base means a restart or r
 | --- | --- | --- |
 | Unit | sentence splitter, backchannel filter, history trimming from marks, greeting/warm-intro rules, TwiML builders, μ-law codec, caps logic | plain pytest |
 | Integration (core) | full sessions: greeting → question → answer; returning-caller greeting; name saved via `save_caller_details`; barge-in mid-answer; filler; `save_message` + email; `end_session`; anonymous caller; provider failure → apology clip | `FakeVoiceAdapter` + `FakeSTT` (scripted events) + `FakeLLM` (scripted deltas/tool calls) + `FakeTTS` (timestamps) + real SQLite on a temp file + `FakeNotifier`, wired through the registry with the real prompt from `kb.example/` (`tests/integration/test_calls.py`) |
-| Contract | each provider maps vendor events to our types correctly | recorded vendor messages replayed from fixtures |
+| Contract | each provider maps vendor events to our types correctly | fake sockets / a mock HTTP transport playing the vendors' documented message shapes; `try_pipeline.py --record` captures real ones to replace them |
+| Live (dev) | real providers end to end, latency, cache hits, vendor behaviour the docs leave open | `scripts/try_pipeline.py`, run by hand (costs a fraction of a cent) |
+| Guard | no private email address in any tracked file | `tests/unit/test_no_personal_data.py`, which reads the real address from `.env` / `kb/` |
 | Manual | real calls against the spec's acceptance list | the checklist, run on a phone |
 | Eval (later) | 30 KB questions, 10 out-of-scope, 10 injection | separate script against the real LLM with the real prompt |
 
@@ -563,7 +595,7 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 
 1. ✅ **Skeleton:** uv project, config loading, constants, migrations, storage, and the interfaces with their fakes. Tests pass on an empty core.
 2. ✅ **Core turn engine on fakes:** state machine, sentence splitter, history, barge-in, filler, tools, plus the registry with its caps and the session summary. The integration tests are the definition of done.
-3. **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate.
+3. ✅ **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate. Result: warm turns about 0.9–2.0 s from the caller stopping to the first audio (plus the phone network), most of it Claude; the cache hits on every turn after the prewarm. Also added along the way: the goodbye hold, spelling, pronunciations, the prewarm and the IPv4 retry.
 4. **Twilio adapter:** webhook, stream, marks and clear, fallback URL. First real call.
 5. **Messages and email:** `save_message` → Gmail.
 6. **Admin page.**
@@ -576,8 +608,11 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 
 | Item | Where it bites | Resolve by |
 | --- | --- | --- |
-| Exact Flux event names and whether interim words arrive before EndOfTurn | §6.1, §6.4 | Deepgram docs + a recorded session (slice 3) |
-| Cartesia context/continuation API, word timestamps, 8 kHz PCM output | §9, §6.3 | Cartesia docs + slice 3 |
+| Flux ending turns at pauses mid-thought; `eot_threshold` | §6.1, §10 | real calls (step 4), then tune |
+| Eager end-of-turn: start the reply on `EagerEndOfTurn`; saves at most part of Flux's decision time | §6.1 | measure Flux on real speech first |
+| Speak the first clause sooner (the first sentence waits 100–400 ms to finish) | §6.2 | after real calls; measure with the dev script |
+| The model spelling by hand after seeing spelled letters in its history | §8.6 | watch real calls; add a line to `instructions.md` if it happens |
+| Claude's time to first text (0.45–1.6 s); a smaller knowledge base or a host near Anthropic | §8.1 | after deploying |
 | Whether Twilio signs the Media Stream WS handshake | §7.2 (token covers it either way) | Twilio docs |
 | Hosting provider | §14 | Owner decision before the first real-number test |
 | Thinking off vs adaptive at low effort for answer quality | §8.1 | the eval set once the KB exists |
