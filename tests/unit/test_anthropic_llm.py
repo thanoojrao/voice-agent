@@ -320,6 +320,43 @@ async def test_connection_failure_is_retryable():
     assert caught.value.retryable
 
 
+# -- prewarm --------------------------------------------------------------------------------
+
+
+def prewarm_response() -> httpx2.Response:
+    message = {
+        "id": "msg_0",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-haiku-5-5",
+        "content": [],
+        "stop_reason": "max_tokens",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 8, "cache_creation_input_tokens": 3000, "output_tokens": 0},
+    }
+    return httpx2.Response(200, json=message)
+
+
+async def test_prewarm_caches_the_same_prefix_as_a_reply_and_generates_nothing():
+    api = Api(prewarm_response(), ok_stream(streamed(text_block(0, "Hi."))))
+    await api.llm.prewarm(SYSTEM, TOOLS)
+    await reply(api)
+    warm, real = api.requests
+
+    assert warm["max_tokens"] == 0
+    assert "stream" not in warm
+    # Everything up to the cache breakpoint must match, or the reply misses the cache.
+    for key in ("model", "system", "tools", "thinking", "output_config"):
+        assert warm[key] == real[key], key
+
+
+async def test_prewarm_failure_is_a_provider_error():
+    api = Api(httpx2.Response(529, json=error_body("overloaded_error")))
+    with pytest.raises(ProviderError) as caught:
+        await api.llm.prewarm(SYSTEM, TOOLS)
+    assert caught.value.retryable
+
+
 # -- summary --------------------------------------------------------------------------------
 
 

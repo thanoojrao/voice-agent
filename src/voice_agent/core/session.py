@@ -182,8 +182,10 @@ class Session:
         loop = asyncio.get_running_loop()
         self._loop_start = self._idle_since = loop.time()
         pump: asyncio.Task[None] | None = None
+        prewarm: asyncio.Task[None] | None = None
         try:
             opening = await self._set_up()
+            prewarm = asyncio.create_task(self._prewarm())
             pump = asyncio.create_task(self._pump_stt())
             self._speak(opening)
             while self._end_reason is None:
@@ -198,8 +200,19 @@ class Session:
             log.exception("session %s crashed", self._session_id)
             await self._fatal(repr(e))
         finally:
+            if prewarm is not None:
+                prewarm.cancel()  # a very short call: no need to finish warming
+                await asyncio.wait([prewarm])
             await self._finish(pump)
         return self._end_reason or ERROR
+
+    async def _prewarm(self) -> None:
+        """Warm the model's prompt cache while the greeting plays, so the first answer
+        doesn't pay for it. A failure only means a slower first answer."""
+        try:
+            await self._deps.llm.prewarm(self._system, self._tools)
+        except Exception:
+            log.warning("prewarm failed (session %s)", self._session_id, exc_info=True)
 
     async def _set_up(self) -> str:
         """Find the caller, create the session, build the prompt. Returns the opening."""
@@ -506,6 +519,9 @@ class _Scripted:
 
     async def summarize(self, transcript: str) -> str:
         raise NotImplementedError
+
+    async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:
+        pass
 
 
 async def _quietly(op: Awaitable[object]) -> None:

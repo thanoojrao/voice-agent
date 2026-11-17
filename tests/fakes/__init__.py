@@ -182,6 +182,8 @@ class FakeLLM:
     summary: str = "Fake summary."
     calls: list[LlmCall] = field(default_factory=list)
     summarized: list[str] = field(default_factory=list)
+    prewarmed: list[LlmCall] = field(default_factory=list)
+    prewarm_raises: Exception | None = None
 
     async def stream_reply(
         self, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]
@@ -200,6 +202,11 @@ class FakeLLM:
     async def summarize(self, transcript: str) -> str:
         self.summarized.append(transcript)
         return self.summary
+
+    async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:
+        self.prewarmed.append(LlmCall(list(system), [], list(tools)))
+        if self.prewarm_raises:
+            raise self.prewarm_raises
 
 
 # ---------------------------------------------------------------------------

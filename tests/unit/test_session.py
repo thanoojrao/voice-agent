@@ -152,6 +152,31 @@ async def test_first_time_caller_gets_greeting_and_name_question(store):
     assert await call.ended() == "caller_hangup"
 
 
+async def test_the_prompt_is_prewarmed_once_at_the_start_with_the_sessions_prompt(store):
+    call = Call(store, [reply("I build agents.")])
+    await call.connect()
+    call.say("What do you do?")
+    await call.played(2)
+
+    [warm] = call.llm.prewarmed
+    [real] = call.llm.calls
+    assert warm.system == real.system
+    assert warm.tools == real.tools
+    await call.adapter.hang_up()
+    await call.ended()
+
+
+async def test_a_failed_prewarm_does_not_affect_the_call(store):
+    call = Call(store, [reply("I build agents.")])
+    call.llm.prewarm_raises = ProviderError("overloaded", retryable=True)
+    await call.connect()
+    call.say("What do you do?")
+    await call.played(2)
+    assert call.tts.spoken[-1] == "I build agents."
+    await call.adapter.hang_up()
+    assert await call.ended() == "caller_hangup"
+
+
 async def test_returning_caller_is_greeted_by_name_and_the_model_gets_the_summary(store):
     caller = await store.get_or_create_caller("twilio", NUMBER)
     await store.set_caller_details(caller.id, "Sam", None, None)

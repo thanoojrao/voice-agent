@@ -21,6 +21,11 @@ Choices, and why:
 - No eager input streaming. It only makes tool input arrive sooner while the block is being
   written, but a tool can't run until its block ends anyway, and it turns off the API's own
   check of the input.
+- prewarm() sends the same request with max_tokens 0 when a call connects. The API writes
+  the prompt cache and returns without generating anything, so the first real reply reads
+  the cache instead of writing it. The greeting plays meanwhile, so nobody waits for it.
+  It must match a real request up to the cache breakpoint (tools, blocks 1 and 2, thinking
+  and effort), or it would write an entry the real requests never read.
 """
 
 import logging
@@ -53,6 +58,7 @@ type Effort = Literal["low", "medium", "high", "xhigh", "max"]
 EFFORT: Effort = "low"
 SUMMARY_MAX_TOKENS = 200
 SUMMARY_TIMEOUT_S = 30.0  # after the call, so nobody is waiting on the line
+PREWARM_MESSAGE = "(The call has connected.)"  # read while caching, never answered
 SUMMARY_SYSTEM = (
     "You write the note an assistant keeps about a phone caller, which it reads at the start "
     "of their next call. Summarize the call in the transcript in one or two plain sentences: "
@@ -139,6 +145,26 @@ class AnthropicLLM:
             input_tokens=usage.input_tokens,
             cache_read_tokens=usage.cache_read_input_tokens or 0,
             output_tokens=usage.output_tokens,
+        )
+
+    async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:
+        try:
+            reply = await self._client.messages.create(
+                model=self._model,
+                max_tokens=0,  # write the cache, generate nothing
+                system=[_system_block(b) for b in system],
+                messages=[{"role": "user", "content": PREWARM_MESSAGE}],
+                tools=[_tool(t) for t in tools],
+                thinking={"type": "disabled"},
+                output_config=self._output_config,
+            )
+        except anthropic.APIError as e:
+            raise to_provider_error(e) from e
+        usage = reply.usage
+        log.debug(
+            "llm prewarm: cached=%d written=%d",
+            usage.cache_read_input_tokens or 0,
+            usage.cache_creation_input_tokens or 0,
         )
 
     async def summarize(self, transcript: str) -> str:

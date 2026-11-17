@@ -184,6 +184,11 @@ class LanguageModel(Protocol):
 
     async def summarize(self, transcript: str) -> str: ...
 
+    async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:
+        """Get the shared part of the prompt ready (e.g. cached) before the first reply,
+        without generating anything. Called at the start of a session."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Text to speech

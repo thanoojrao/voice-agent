@@ -408,6 +408,8 @@ async def run(args: argparse.Namespace) -> None:
                 await stream.finish()
                 questions.append((text, b"".join([c.pcm async for c in stream.audio()])))
 
+        if not args.cold:  # as a real call does while the greeting plays
+            await llm.prewarm(system, tools)
         history = History()
         history.add_agent(config.greeting.format(owner_name=config.owner_name))
         stt = await flux.open(RATE)
@@ -463,6 +465,7 @@ def main() -> None:
     parser.add_argument("--kb", type=Path, default=Path("kb"), help="knowledge base folder")
     parser.add_argument("--out", type=Path, default=Path("data/dev"), help="output folder")
     parser.add_argument("--record", action="store_true", help="save raw provider messages")
+    parser.add_argument("--cold", action="store_true", help="skip the prompt cache prewarm")
     parser.add_argument("--probe-cancel", action="store_true", help="what follows a cancel")
     parser.add_argument("--probe-gap", action="store_true", help="a context after 1.5 s quiet")
     args = parser.parse_args()
