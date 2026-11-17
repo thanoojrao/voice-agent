@@ -386,7 +386,9 @@ async def run(args: argparse.Namespace) -> None:
 
     cartesia_key = settings.cartesia_api_key.get_secret_value()
     tts = CartesiaTTS(
-        cartesia_key, connect=recording(cartesia_tts._websocket, "cartesia", recorder)
+        cartesia_key,
+        CartesiaSettings(pronunciations=config.pronunciations),
+        connect=recording(cartesia_tts._websocket, "cartesia", recorder),
     )
     client = new_client(settings.anthropic_api_key.get_secret_value(), timeout_s=10.0)
     llm = AnthropicLLM(client, config.llm_model)

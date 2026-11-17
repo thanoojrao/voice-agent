@@ -35,6 +35,14 @@ def test_unknown_key_rejected():
         AgentConfig.model_validate(base(silence_promt_s=8))
 
 
+def test_pronunciations_are_one_word_each_way():
+    AgentConfig.model_validate(base(pronunciations={"Durgapur": "DOOR-gah-poor"}))
+    with pytest.raises(ValidationError):
+        AgentConfig.model_validate(base(pronunciations={"Durgapur": "door gah poor"}))
+    with pytest.raises(ValidationError):
+        AgentConfig.model_validate(base(pronunciations={"New York": "NY"}))
+
+
 def test_blocked_numbers_must_be_e164():
     AgentConfig.model_validate(base(blocked_numbers=["+15551234567"]))
     with pytest.raises(ValidationError):

@@ -26,6 +26,9 @@ Choices, and why:
   the audio already received so the turn keeps one timeline.
 - Cancel only stops text Cartesia hasn't started on; audio already being made still comes.
   So cancel() ends audio() itself, and anything that arrives later for the turn is dropped.
+- Pronunciations (from the config) are swapped in just before a sentence is sent, so the
+  model, the history and the transcripts keep the real spelling. Each word is replaced by
+  one word, so Cartesia's word timings still count the same words as the history.
 - A connect that fails on the network is tried once more over IPv4. Measured from home:
   about half of the IPv6 handshakes to Cartesia were reset, none over IPv4. A refusal (an
   HTTP status such as 401) isn't retried; asking again wouldn't change the answer.
@@ -35,10 +38,11 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import socket
 import uuid
-from collections.abc import AsyncIterator, Awaitable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from websockets.asyncio.client import connect as ws_connect
@@ -65,6 +69,8 @@ class CartesiaSettings:
     context_gap_s: float = 0.5  # renew a context this long after its last audio (expiry: 1 s)
     finish_timeout_s: float = 5.0  # after finish(), how long to wait for the rest of the audio
     connect_timeout_s: float = 5.0
+    # word -> how to say it: a sounds-like spelling ("DOOR-gah-poor") or Cartesia IPA
+    pronunciations: Mapping[str, str] = field(default_factory=dict)
 
 
 class Socket(Protocol):
@@ -112,10 +118,17 @@ class CartesiaTTS:
         self._reader: asyncio.Task[None] | None = None
         self._streams: dict[str, CartesiaStream] = {}  # context id -> its turn
         self._connecting = asyncio.Lock()
+        self._respell = respeller(self._settings.pronunciations)
 
     async def open(self, sample_rate: int, voice_id: str) -> "CartesiaStream":
         await self._ensure_connected()
-        return CartesiaStream(self, self._settings, sample_rate=sample_rate, voice_id=voice_id)
+        return CartesiaStream(
+            self,
+            self._settings,
+            sample_rate=sample_rate,
+            voice_id=voice_id,
+            respell=self._respell,
+        )
 
     async def aclose(self) -> None:
         """At shutdown."""
@@ -209,6 +222,17 @@ class CartesiaTTS:
         # else: a cancelled or finished turn's late audio
 
 
+def respeller(pronunciations: Mapping[str, str]) -> "Callable[[str], str]":
+    """A function that swaps each listed word for how to say it, whole words only and in
+    any case ("Durgapur", "DURGAPUR,"); text without them comes back unchanged."""
+    if not pronunciations:
+        return lambda text: text
+    by_word = {word.lower(): said for word, said in pronunciations.items()}
+    words = "|".join(re.escape(w) for w in sorted(by_word, key=len, reverse=True))
+    pattern = re.compile(rf"\b(?:{words})\b", re.IGNORECASE)
+    return lambda text: pattern.sub(lambda m: by_word[m.group(0).lower()], text)
+
+
 class CartesiaStream:
     """One agent turn. Audio comes out of audio() in the order it arrives."""
 
@@ -219,8 +243,10 @@ class CartesiaStream:
         *,
         sample_rate: int,
         voice_id: str,
+        respell: "Callable[[str], str]" = lambda text: text,
     ) -> None:
         self._owner = owner
+        self._respell = respell
         self._settings = settings
         self._bytes_per_ms = sample_rate * BYTES_PER_SAMPLE / 1000
         # Sent with every message of a context; Cartesia wants them the same each time.
@@ -254,7 +280,7 @@ class CartesiaStream:
             self._new_context()
         self._last_said_at = _now()
         # Cartesia joins transcripts exactly as sent; the space keeps sentences apart.
-        await self._owner.send(self._message(sentence + " ", more=True))
+        await self._owner.send(self._message(self._respell(sentence) + " ", more=True))
 
     async def finish(self) -> None:
         if self._ended:

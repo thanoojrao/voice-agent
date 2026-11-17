@@ -22,6 +22,7 @@ from voice_agent.providers.cartesia_tts import (
     CartesiaSettings,
     CartesiaStream,
     CartesiaTTS,
+    respeller,
 )
 
 RATE = 8000
@@ -253,6 +254,21 @@ async def test_finishing_a_turn_that_said_nothing_ends_audio_without_sending():
     await stream.finish()
     assert await rest(stream.audio()) == []
     assert socket.sent == []
+
+
+async def test_pronunciations_are_swapped_in_only_on_the_way_to_cartesia():
+    socket = FakeSocket()
+    settings = CartesiaSettings(pronunciations={"Durgapur": "DOOR-gah-poor"})
+    stream = await opened(socket, settings)
+    await stream.say("I studied in Durgapur, at DURGAPUR's college; not durgapurx.")
+    assert socket.sent[0]["transcript"] == (
+        "I studied in DOOR-gah-poor, at DOOR-gah-poor's college; not durgapurx. "
+    )
+
+
+def test_respeller_leaves_text_alone_with_no_pronunciations():
+    assert respeller({})("Durgapur") == "Durgapur"
+    assert respeller({"ab": "X", "abc": "Y"})("ab abc") == "X Y"  # longest match wins
 
 
 # -- pauses ---------------------------------------------------------------------------------

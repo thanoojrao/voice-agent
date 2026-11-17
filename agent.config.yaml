@@ -14,6 +14,10 @@ tone: friendly, concise
 
 # Cartesia voice ID: your clone, or a stock voice if the clone doesn't sound right.
 voice_id: "0216cc0e-7907-4ffa-9c06-db9bae57fa94"
+# How the voice should say particular words. One word each way (hyphens are fine).
+# The value is a sounds-like spelling, or Cartesia IPA like "<<d|ʊ|...>>".
+pronunciations:
+  Durgapur: "<<ˈ|d|ʊ|ɹ|g|ɑ|p|ʊ|ɹ>>"
 llm_model: claude-haiku-5-5
 
 # Timers and caps

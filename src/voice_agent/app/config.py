@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from voice_agent.core.greeting import GreetingTemplates
 
 E164 = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{6,14}$")]
+OneWord = Annotated[str, StringConstraints(pattern=r"^\S+$")]
 
 
 class Settings(BaseSettings):
@@ -53,6 +54,9 @@ class AgentConfig(BaseModel):
     name_question: str = Field(min_length=1)
     tone: str = "friendly, concise"
     voice_id: str = ""
+    # How the voice should say particular words: word -> sounds-like spelling or Cartesia
+    # IPA. One word each way, so word timings still line up for barge-in.
+    pronunciations: dict[OneWord, OneWord] = {}
     llm_model: str = "claude-haiku-5-5"
 
     silence_prompt_s: int = Field(8, ge=5, le=15)
