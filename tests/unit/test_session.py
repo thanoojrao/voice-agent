@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -51,7 +52,12 @@ TURN = TurnSettings(
     mark_grace_ms=50,
 )
 SETTINGS = SessionSettings(
-    turn=TURN, silence_prompt_s=5.0, silence_hangup_s=5.0, max_session_s=30.0, limit_grace_s=5.0
+    turn=TURN,
+    silence_prompt_s=5.0,
+    silence_hangup_s=5.0,
+    max_session_s=30.0,
+    limit_grace_s=5.0,
+    goodbye_hold_s=0.05,
 )
 
 
@@ -256,13 +262,72 @@ async def test_interrupting_the_goodbye_keeps_the_call_going(store):
     assert await call.ended() == "caller_hangup"
 
 
+async def test_after_a_goodbye_the_line_stays_open_for_the_hold_then_hangs_up(store):
+    settings = replace(SETTINGS, goodbye_hold_s=0.3)
+    call = Call(store, [goodbye()], settings=settings)
+    await call.connect()
+    call.say("Thanks, bye.")
+    await call.played(2)
+
+    await asyncio.sleep(0.1)
+    assert not call.adapter.ended  # still holding
+    assert await call.ended() == "goodbye"
+    assert call.adapter.ended
+
+
+async def test_speaking_during_the_hold_carries_the_call_on(store):
+    settings = replace(SETTINGS, goodbye_hold_s=0.3)
+    call = Call(store, [goodbye(), reply("Of course, go ahead.")], settings=settings)
+    await call.connect()
+    call.say("Okay, thanks.")
+    await call.played(2)
+    call.say("Oh wait, can I leave a message?")
+    await call.played(3)
+
+    assert call.tts.spoken[-1] == "Of course, go ahead."
+    await asyncio.sleep(0.4)  # longer than the hold: the goodbye no longer counts
+    assert not call.adapter.ended
+    await call.adapter.hang_up()
+    assert await call.ended() == "caller_hangup"
+
+
+async def test_a_backchannel_during_the_hold_is_not_answered(store):
+    settings = replace(SETTINGS, goodbye_hold_s=0.1)
+    call = Call(store, [goodbye()], settings=settings)
+    await call.connect()
+    call.say("Thanks, bye.")
+    await call.played(2)
+    call.say("Okay.")
+    assert await call.ended() == "goodbye"
+    assert len(call.llm.calls) == 1
+
+
+async def test_an_abusive_caller_is_hung_up_on_without_a_hold(store):
+    settings = replace(SETTINGS, goodbye_hold_s=10.0)
+    call = Call(store, [goodbye("I'm ending this call now.", reason="abuse")], settings=settings)
+    await call.connect()
+    call.say("Something abusive.")
+    assert await call.ended() == "abuse"  # well inside the 10 s hold
+
+
+async def test_hanging_up_during_the_hold_ends_the_call(store):
+    settings = replace(SETTINGS, goodbye_hold_s=5.0)
+    call = Call(store, [goodbye()], settings=settings)
+    await call.connect()
+    call.say("Thanks, bye.")
+    await call.played(2)
+    await call.adapter.hang_up()
+    assert await call.ended() == "caller_hangup"
+
+
 # -- timers --------------------------------------------------------------------------
 
 
 async def test_silence_prompts_once_then_hangs_up(store):
     settings = SessionSettings(
-        turn=TURN, silence_prompt_s=0.05, silence_hangup_s=0.05, max_session_s=30.0
-    )
+        turn=TURN, silence_prompt_s=0.05, silence_hangup_s=0.05, max_session_s=30.0,
+        goodbye_hold_s=0.05,
+    )  # fmt: skip
     call = Call(store, [], settings=settings)
     await call.connect()
     assert await call.ended() == "silence"
@@ -285,8 +350,9 @@ async def test_speaking_resets_the_silence_prompt(store):
 
 async def test_time_limit_tells_the_model_to_wrap_up(store):
     settings = SessionSettings(
-        turn=TURN, silence_prompt_s=5.0, silence_hangup_s=5.0, max_session_s=0.1
-    )
+        turn=TURN, silence_prompt_s=5.0, silence_hangup_s=5.0, max_session_s=0.1,
+        goodbye_hold_s=0.05,
+    )  # fmt: skip
     call = Call(store, [goodbye("We're out of time, bye!", reason="limit")], settings=settings)
     await call.connect()
     assert await call.ended() == "limit"

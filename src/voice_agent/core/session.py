@@ -15,6 +15,11 @@ barge-in and a turn ending at the same moment.
 Fixed lines (the greeting, "Are you still there?", the silence goodbye) are spoken as turns
 too, from a one-line scripted model, so they get the same marks, barge-in and history.
 
+After a goodbye the line stays open for `goodbye_hold_s` before the session hangs up, so a
+caller who remembers one more thing isn't cut off: real words in that time carry the call
+on, and silence or a "mm-hm" lets it end. Most callers hang up themselves first. An abusive
+caller is hung up on straight away.
+
 Turn rows are written as they happen, so a crash loses at most the summary.
 """
 
@@ -70,6 +75,8 @@ CALLER_HANGUP = "caller_hangup"
 SILENCE = "silence"
 LIMIT = "limit"
 ERROR = "error"
+# Ended at once, with no goodbye hold.
+_NO_HOLD = frozenset({"abuse"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +86,7 @@ class SessionSettings:
     silence_hangup_s: float  # further silence before hanging up
     max_session_s: float  # the model is told to wrap up
     limit_grace_s: float = 60.0  # then hang up regardless
+    goodbye_hold_s: float = 3.0  # line kept open after a goodbye, for "oh, one more thing"
     record_transcripts: bool = True
 
 
@@ -142,6 +150,8 @@ class Session:
         self._last_filler: Clip | None = None
         self._transcript: list[str] = []  # for the summary
         self._end_after_turn: str | None = None  # hang up once this turn has played
+        self._holding: str | None = None  # the end reason waiting out the goodbye hold
+        self._hang_up_at = 0.0
 
         # Timers, in loop time.
         self._loop_start = 0.0
@@ -259,6 +269,12 @@ class Session:
         self._caller_speaking = False
         self._idle_since = self._now()
         heard = classify(transcript)
+        if self._holding is not None:
+            if heard is not Heard.SPEECH:  # a cough or "okay" after the goodbye
+                self._hang_up_at = self._now() + self._settings.goodbye_hold_s
+                return
+            log.info("session %s: caller spoke after the goodbye; carrying on", self._session_id)
+            self._cancel_ending()
         if heard is Heard.NOTHING:
             return
         if self._turn is not None:
@@ -281,11 +297,14 @@ class Session:
             return
         result = await turn.interrupt()
         if result.outcome is Outcome.INTERRUPTED:
-            # The caller cut in on a goodbye: keep talking instead of hanging up.
-            self._end_after_turn = None
-            if self._tool_ctx is not None:
-                self._tool_ctx.end_reason = None
+            self._cancel_ending()  # the caller cut in on a goodbye: keep talking
         await self._settle(result)
+
+    def _cancel_ending(self) -> None:
+        self._end_after_turn = None
+        self._holding = None
+        if self._tool_ctx is not None:
+            self._tool_ctx.end_reason = None
 
     async def _settle(self, result: TurnResult) -> None:
         """Store a finished turn and decide what happens next."""
@@ -311,18 +330,30 @@ class Session:
         if result.outcome is Outcome.FAILED:
             await self._alert(result.error or "unknown error")
             self._end_reason = ERROR
-        elif result.outcome is Outcome.COMPLETED and self._end_after_turn:
-            self._end_reason = self._end_after_turn
-        elif result.outcome is Outcome.COMPLETED and result.end_reason:
-            self._end_reason = result.end_reason
+        elif result.outcome is Outcome.COMPLETED and (
+            reason := self._end_after_turn or result.end_reason
+        ):
+            self._end_after_turn = None
+            self._end_or_hold(reason)
         elif self._add_limit_note_if_due():
             self._reply()  # the limit passed mid-turn: let the model wrap up now
+
+    def _end_or_hold(self, reason: str) -> None:
+        if reason in _NO_HOLD or self._settings.goodbye_hold_s <= 0:
+            self._end_reason = reason
+            return
+        self._holding = reason
+        self._hang_up_at = self._now() + self._settings.goodbye_hold_s
 
     # -- timers ------------------------------------------------------------------------------
 
     def _next_timer_in(self) -> float:
         s = self._settings
         deadlines = [self._loop_start + s.max_session_s + s.limit_grace_s]
+        if self._holding is not None:  # only the hold, and the hard limit, apply
+            if not self._caller_speaking:
+                deadlines.append(self._hang_up_at)
+            return max(0.0, min(deadlines) - self._now())
         if not self._limit_reached:
             deadlines.append(self._loop_start + s.max_session_s)
         if self._turn is None and not self._caller_speaking:
@@ -335,6 +366,10 @@ class Session:
         if now >= self._loop_start + s.max_session_s + s.limit_grace_s:
             log.info("session %s hit the hard time limit", self._session_id)
             self._end_reason = LIMIT
+            return
+        if self._holding is not None:
+            if not self._caller_speaking and now >= self._hang_up_at:
+                self._end_reason = self._holding
             return
         if not self._limit_reached and now >= self._loop_start + s.max_session_s:
             self._limit_reached = True

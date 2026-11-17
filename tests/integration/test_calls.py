@@ -62,6 +62,7 @@ SETTINGS = SessionSettings(
     silence_prompt_s=5.0,
     silence_hangup_s=5.0,
     max_session_s=60.0,
+    goodbye_hold_s=0.05,
 )
 LIMITS = Limits(max_concurrent=2, daily_cap=50, per_caller_daily=2)
 
