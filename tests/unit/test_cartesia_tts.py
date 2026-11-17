@@ -12,7 +12,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from websockets.exceptions import ConnectionClosedError
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosedError, InvalidStatus
+from websockets.http11 import Response
 
 from voice_agent.core.interfaces import ProviderError, TtsChunk, WordTiming
 from voice_agent.providers.cartesia_tts import (
@@ -66,9 +68,13 @@ class Server:
     def __init__(self, *outcomes: FakeSocket | Exception) -> None:
         self._outcomes = list(outcomes)
         self.connections: list[tuple[str, dict[str, str], float]] = []
+        self.ipv4: list[bool] = []
 
-    async def connect(self, url: str, headers: dict[str, str], timeout_s: float) -> FakeSocket:
+    async def connect(
+        self, url: str, headers: dict[str, str], timeout_s: float, *, ipv4: bool = False
+    ) -> FakeSocket:
         self.connections.append((url, headers, timeout_s))
+        self.ipv4.append(ipv4)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -151,10 +157,28 @@ async def test_connects_once_with_the_key_and_version_in_headers_and_reuses_it()
     assert timeout_s == CartesiaSettings().connect_timeout_s
 
 
-async def test_failing_to_connect_raises_provider_error():
+async def test_a_network_failure_is_tried_once_more_over_ipv4():
+    server = Server(ConnectionResetError(), FakeSocket())
+    await make_tts(server).open(RATE, VOICE)
+    assert server.ipv4 == [False, True]
+
+
+async def test_failing_to_connect_twice_raises_provider_error():
+    server = Server(OSError("no route to host"), OSError("no route to host"))
     with pytest.raises(ProviderError) as caught:
-        await make_tts(Server(OSError("no route to host"))).open(RATE, VOICE)
+        await make_tts(server).open(RATE, VOICE)
     assert caught.value.retryable
+    assert len(server.connections) == 2
+
+
+async def test_a_refused_handshake_is_not_retried():
+    refused = InvalidStatus(Response(401, "Unauthorized", Headers()))
+    server = Server(refused, FakeSocket())
+    with pytest.raises(ProviderError) as caught:
+        await make_tts(server).open(RATE, VOICE)
+    assert not caught.value.retryable
+    assert "401" in str(caught.value)
+    assert len(server.connections) == 1
 
 
 # -- speaking -------------------------------------------------------------------------------

@@ -26,14 +26,18 @@ Choices, and why:
   the audio already received so the turn keeps one timeline.
 - Cancel only stops text Cartesia hasn't started on; audio already being made still comes.
   So cancel() ends audio() itself, and anything that arrives later for the turn is dropped.
+- A connect that fails on the network is tried once more over IPv4. Measured from home:
+  about half of the IPv6 handshakes to Cartesia were reset, none over IPv4. A refusal (an
+  HTTP status such as 401) isn't retried; asking again wouldn't change the answer.
 """
 
 import asyncio
 import base64
 import json
 import logging
+import socket
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -71,12 +75,22 @@ class Socket(Protocol):
     async def close(self) -> None: ...
 
 
-Connect = Callable[[str, dict[str, str], float], Awaitable[Socket]]
+class Connect(Protocol):
+    def __call__(
+        self, url: str, headers: dict[str, str], timeout_s: float, *, ipv4: bool = False
+    ) -> Awaitable[Socket]: ...
 
 
-async def _websocket(url: str, headers: dict[str, str], timeout_s: float) -> Socket:
+async def _websocket(
+    url: str, headers: dict[str, str], timeout_s: float, *, ipv4: bool = False
+) -> Socket:
     return await ws_connect(
-        url, additional_headers=headers, open_timeout=timeout_s, compression=None
+        url,
+        additional_headers=headers,
+        open_timeout=timeout_s,
+        compression=None,
+        # Passed on to the TCP connect. AF_UNSPEC is the default: IPv6 or IPv4.
+        family=socket.AF_INET if ipv4 else socket.AF_UNSPEC,
     )
 
 
@@ -143,18 +157,23 @@ class CartesiaTTS:
             self._reader = asyncio.create_task(self._read(self._socket))
 
     async def _open(self) -> Socket:
-        try:
-            return await self._connect(URL, self._headers, self._settings.connect_timeout_s)
-        except InvalidStatus as e:  # the server answered the handshake with an HTTP error
-            status = e.response.status_code
-            retryable = status == 429 or status >= 500
-            raise ProviderError(
-                f"cartesia refused the connection: {status}", retryable=retryable
-            ) from e
-        except (WebSocketException, OSError, TimeoutError) as e:
-            raise ProviderError(
-                f"cartesia connect failed: {type(e).__name__}", retryable=True
-            ) from e
+        timeout_s = self._settings.connect_timeout_s
+        for ipv4 in (False, True):
+            try:
+                return await self._connect(URL, self._headers, timeout_s, ipv4=ipv4)
+            except InvalidStatus as e:  # the server answered the handshake with an HTTP error
+                status = e.response.status_code
+                retryable = status == 429 or status >= 500
+                raise ProviderError(
+                    f"cartesia refused the connection: {status}", retryable=retryable
+                ) from e
+            except (WebSocketException, OSError, TimeoutError) as e:
+                if ipv4:
+                    raise ProviderError(
+                        f"cartesia connect failed: {type(e).__name__}", retryable=True
+                    ) from e
+                log.warning("cartesia connect failed (%s); trying IPv4", type(e).__name__)
+        raise AssertionError("unreachable")
 
     async def _read(self, socket: Socket) -> None:
         try:
