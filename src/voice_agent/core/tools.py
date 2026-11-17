@@ -7,10 +7,11 @@
 The model only sends the fields below. Who the caller is and which session this is come from
 `ToolContext`, which the session fills in, so the model can never touch another caller's row.
 
-Tool input arrives with eager input streaming, so it can be cut short or malformed. Every
-input is checked against the tool's own schema before its handler runs, and any failure goes
-back to the model as an `is_error` result it can recover from in conversation. Nothing in
-here raises into the turn loop.
+The core doesn't rely on how a provider sends tools (the Claude provider uses strict tool
+use, which can't express length limits). So every input is checked against the tool's own
+schema here, limits included, before its handler runs, and any failure goes back to the
+model as an `is_error` result it can recover from in conversation. Nothing in here raises
+into the turn loop.
 """
 
 from __future__ import annotations
