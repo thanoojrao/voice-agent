@@ -8,7 +8,8 @@
 
 Three things run at once, so the caller hears sentence 1 while the model writes sentence 3:
 
-    think:   LLM stream -> sentence splitter -> tts.say(); tool calls run between requests
+    think:   LLM stream -> sentence splitter -> speakable() -> tts.say(); tool calls run
+             between requests
     play:    TTS audio  -> adapter.send_audio(), then a mark after each chunk's words
     filler:  no reply audio after `filler_after_ms` -> play one filler clip
 
@@ -52,6 +53,7 @@ from voice_agent.core.interfaces import (
     TtsStream,
 )
 from voice_agent.core.sentences import SentenceSplitter
+from voice_agent.core.speech import speakable
 from voice_agent.core.tools import ToolContext, run_tool
 
 log = logging.getLogger(__name__)
@@ -275,9 +277,14 @@ class Turn:
         return calls, False
 
     async def _say(self, tts: TtsStream, sentence: str) -> None:
-        self._history.add_agent_text(sentence)
+        # The history keeps what's spoken (spelled out), so the words heard, counted from
+        # the audio, match the words in the history when a reply is cut off.
+        spoken = speakable(sentence)
+        if not spoken.strip():
+            return
+        self._history.add_agent_text(spoken)
         self._said_this_request = True
-        await tts.say(sentence)
+        await tts.say(spoken)
 
     async def _run_tools(self, calls: list[ToolCall], *, over_limit: bool) -> None:
         # All calls first, then all results: the API wants every result for one assistant

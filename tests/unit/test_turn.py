@@ -131,6 +131,13 @@ async def test_reply_is_spoken_sentence_by_sentence_and_kept_in_history(ctx):
     assert result.filler is None
 
 
+async def test_tagged_text_is_spelled_out_in_speech_and_history(ctx):
+    rig = Rig(ctx, [Reply(text("Email me. ", "That's <spell>ab@gmail.com</spell>."))])
+    result = await rig.run()
+    assert rig.tts.spoken == ["Email me.", "That's A B, at gmail dot com."]
+    assert result.spoken == "Email me. That's A B, at gmail dot com."
+
+
 async def test_marks_count_words_and_end_with_an_end_mark(ctx):
     rig = Rig(ctx, [Reply(text("One two. ", "Three four five."))])
     await rig.run()
