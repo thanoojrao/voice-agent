@@ -50,6 +50,7 @@ from voice_agent.core.interfaces import (
 )
 from voice_agent.core.prompt import CallContext, Prompt, load_instructions, load_knowledge_base
 from voice_agent.core.sentences import SentenceSplitter
+from voice_agent.core.speech import speakable
 from voice_agent.core.tools import tool_defs
 from voice_agent.providers import cartesia_tts, deepgram_flux
 from voice_agent.providers.anthropic_llm import AnthropicLLM, new_client
@@ -236,11 +237,16 @@ async def speak_reply(
         calls: list[ToolCall] = []
 
         async def say(sentence: str) -> None:
+            spoken = speakable(sentence)  # as the turn does: <spell> tags become letters
+            if not spoken.strip():
+                return
             if not times.first_sentence:
                 times.first_sentence = loop.time()
-            history.add_agent_text(sentence)
+            history.add_agent_text(spoken)
             print(f"    agent: {sentence}")
-            await tts.say(sentence)
+            if spoken != sentence:
+                print(f"      spoken as: {spoken}")
+            await tts.say(spoken)
 
         async for event in llm.stream_reply(system, history.messages, tools):
             match event:
