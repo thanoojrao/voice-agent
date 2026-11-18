@@ -11,3 +11,6 @@ data/
 
 # Real knowledge base: personal, never committed (the repo ships kb.example/)
 kb/
+
+# Clips rendered in the agent's voice by scripts/generate_clips.py (may be a voice clone)
+assets/audio/
