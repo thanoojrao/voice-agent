@@ -7,6 +7,6 @@ SPEAKING_RATE = 1.0  # TTS speed multiplier
 MAX_ANSWER_SENTENCES = 3  # spoken answers stay short
 LANGUAGE = "en"  # English only
 CHANNELS = ("twilio",)  # the only channel in v0
-FILLER_AFTER_MS = 1500  # play a filler clip if no audio is ready by then
+FILLER_AFTER_MS = 2500  # play a filler clip if no audio is ready by then (normal replies: 1.2-2 s)
 PROVIDER_TIMEOUT_S = 5.0  # per provider call before the apology clip
 BLOCK_ANONYMOUS = False  # withheld caller IDs are allowed

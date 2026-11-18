@@ -276,7 +276,7 @@ stateDiagram-v2
     [*] --> Speaking: greeting
     Listening --> Thinking: STT TurnEnded(transcript)
     Thinking --> Speaking: first TTS audio ready
-    Thinking --> Speaking: filler timer (1.5 s) fires → play filler clip
+    Thinking --> Speaking: filler timer (2.5 s) fires → play filler clip
     Speaking --> Listening: last mark played
     Speaking --> Interrupted: STT real word during playback
     Thinking --> Interrupted: STT real word before audio

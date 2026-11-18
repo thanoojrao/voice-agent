@@ -51,7 +51,7 @@ from voice_agent.core.session import Session, SessionDeps, SessionSettings
 from voice_agent.core.turn import TurnSettings
 from voice_agent.providers.anthropic_llm import AnthropicLLM, new_client
 from voice_agent.providers.cartesia_tts import CartesiaSettings, CartesiaTTS
-from voice_agent.providers.deepgram_flux import DeepgramFlux
+from voice_agent.providers.deepgram_flux import DeepgramFlux, FluxSettings
 from voice_agent.storage.sqlite import SqliteStorage
 
 log = logging.getLogger(__name__)
@@ -122,7 +122,9 @@ def create_app() -> FastAPI:
         storage = await SqliteStorage.open(config.db_path)
         notifier = _LogNotifier()
         llm = AnthropicLLM(client, config.llm_model)
-        stt = DeepgramFlux(secret("deepgram_api_key"))
+        # Callers say the owner's name ("is this your AI?"); Flux hears it better as
+        # a keyterm.
+        stt = DeepgramFlux(secret("deepgram_api_key"), FluxSettings(keyterms=(config.owner_name,)))
         templates = config.greeting_templates()
 
         def new_session(start: SessionStart, adapter: ChannelAdapter) -> Session:
