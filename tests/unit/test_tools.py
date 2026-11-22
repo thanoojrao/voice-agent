@@ -1,11 +1,10 @@
-"""Tool handlers against real SQLite storage and the fake notifier."""
+"""Tool handlers against real SQLite storage."""
 
 import json
 from datetime import UTC, datetime
 
 import pytest
 
-from tests.fakes import FakeNotifier
 from voice_agent.core.interfaces import SessionRow, SessionStart, ToolCall, ToolDef
 from voice_agent.core.tools import (
     END_SESSION,
@@ -29,12 +28,12 @@ async def store(tmp_path):
     await s.close()
 
 
-async def make_ctx(store, number: str | None = NUMBER, notifier=None) -> ToolContext:
+async def make_ctx(store, number: str | None = NUMBER) -> ToolContext:
     caller = await store.get_or_create_caller("twilio", number)
     start = SessionStart("twilio", "CA1", number, 8000)
     session_id = await store.create_session(caller.id, start)
     session = SessionRow(session_id, caller.id, "twilio", "CA1", NOW, None, None, None)
-    return ToolContext(store, notifier or FakeNotifier(), session, caller, clock=lambda: NOW)
+    return ToolContext(store, session, caller, clock=lambda: NOW)
 
 
 async def call(ctx, tool_name, tools: list[ToolDef] = ALL_TOOLS, **args):
@@ -66,46 +65,81 @@ def test_schemas_are_strict_objects(tool):
 # -- save_message --------------------------------------------------------------
 
 
-async def test_save_message_saves_emails_and_marks_notified(store):
-    notifier = FakeNotifier()
-    ctx = await make_ctx(store, notifier=notifier)
+async def test_save_message_saves_but_does_not_email(store):
+    ctx = await make_ctx(store)
     await call(ctx, "save_caller_details", name="Sam")
-    result = await call(ctx, "save_message", body="Call me about the role.")
+    result = await call(ctx, "save_message", contact="this number", body="Call me about the role.")
     assert not result.is_error
     assert json.loads(result.content) == {"saved": True}
-
-    [(msg, caller, session)] = notifier.messages
-    assert (msg.name, msg.contact, msg.body) == ("Sam", None, "Call me about the role.")
-    assert caller.address == NUMBER  # the email shows the number from the caller record
-    assert msg.id is not None and caller.id == ctx.caller.id and session == ctx.session
     rows = await (await message_rows(store)).fetchall()
-    assert rows[0][3] is not None  # notified_at set
+    # The session emails it when the call ends, so it's saved unsent.
+    assert [tuple(r) for r in rows] == [("Sam", None, "Call me about the role.", None)]
+
+
+async def test_saving_again_replaces_the_message(store):
+    ctx = await make_ctx(store)
+    await call(ctx, "save_message", contact="this number", body="Call me about the role.")
+    await call(
+        ctx,
+        "save_message",
+        contact="sam@example.com",
+        body="Call me about the role. I'm free after 3.",
+    )
+    rows = await (await message_rows(store)).fetchall()
+    assert [tuple(r) for r in rows] == [
+        (None, "sam@example.com", "Call me about the role. I'm free after 3.", None)
+    ]
+
+
+async def test_a_message_belongs_to_its_own_session(store):
+    first = await make_ctx(store)
+    await call(first, "save_message", contact="this number", body="First call.")
+    second = await make_ctx(store)  # the same number calls again
+    await call(second, "save_message", contact="this number", body="Second call.")
+    rows = await (await message_rows(store)).fetchall()
+    assert sorted(r[2] for r in rows) == ["First call.", "Second call."]
 
 
 async def test_name_comes_from_the_record_not_the_model(store):
     ctx = await make_ctx(store)
-    result = await call(ctx, "save_message", name="Somebody Else", body="Hello")
+    result = await call(ctx, "save_message", name="Somebody Else", contact="this number", body="Hi")
     assert result.is_error and "unknown field" in result.content
 
 
 async def test_message_without_a_name_is_still_saved(store):
     ctx = await make_ctx(store)
-    result = await call(ctx, "save_message", body="Liked your talk.")
+    result = await call(ctx, "save_message", contact="this number", body="Liked your talk.")
     assert not result.is_error
     rows = await (await message_rows(store)).fetchall()
     assert rows[0][:3] == (None, None, "Liked your talk.")
 
 
-async def test_known_caller_can_add_another_contact(store):
+async def test_contact_is_required(store):
+    # On a real call the model left out an email the caller had spelled and confirmed.
+    ctx = await make_ctx(store)
+    result = await call(ctx, "save_message", body="Hello")
+    assert result.is_error and "missing: contact" in result.content
+    assert await (await message_rows(store)).fetchall() == []
+
+
+async def test_known_caller_can_give_another_contact(store):
     ctx = await make_ctx(store)
     await call(ctx, "save_message", contact="sam@example.com", body="Hello")
     rows = await (await message_rows(store)).fetchall()
     assert rows[0][1] == "sam@example.com"
 
 
+@pytest.mark.parametrize("value", ["this number", "This Number"])
+async def test_this_number_stores_no_extra_contact(store, value):
+    ctx = await make_ctx(store)
+    await call(ctx, "save_message", contact=value, body="Hello")
+    rows = await (await message_rows(store)).fetchall()
+    assert rows[0][1] is None  # the number is on the caller record
+
+
 async def test_anonymous_caller_must_be_asked_for_contact(store):
     ctx = await make_ctx(store, number=None)
-    result = await call(ctx, "save_message", body="Hello")
+    result = await call(ctx, "save_message", contact="this number", body="Hello")
     assert result.is_error and "anonymous" in result.content
     assert await (await message_rows(store)).fetchall() == []
 
@@ -114,26 +148,19 @@ async def test_anonymous_caller_must_be_asked_for_contact(store):
     assert rows[0][:2] == (None, "sam@example.com")
 
 
-async def test_anonymous_caller_can_decline_contact(store):
-    ctx = await make_ctx(store, number=None)
-    result = await call(ctx, "save_message", contact="declined", body="Hello")
+@pytest.mark.parametrize("number", [NUMBER, None])
+async def test_caller_can_decline_contact(store, number):
+    ctx = await make_ctx(store, number=number)
+    result = await call(ctx, "save_message", contact="Declined", body="Hello")
     assert not result.is_error
     rows = await (await message_rows(store)).fetchall()
     assert rows[0][1] == "declined"
 
 
-async def test_email_failure_still_saves_message(store):
-    ctx = await make_ctx(store, notifier=FakeNotifier(fail=True))
-    result = await call(ctx, "save_message", body="Hello")
-    assert not result.is_error  # the caller's message is safe; the owner sees it unsent
-    rows = await (await message_rows(store)).fetchall()
-    assert rows[0][2:] == ("Hello", None)
-
-
 async def test_storage_failure_is_an_error_result(store):
     ctx = await make_ctx(store)
     await store.close()
-    result = await call(ctx, "save_message", body="Hello")
+    result = await call(ctx, "save_message", contact="this number", body="Hello")
     assert result.is_error and "went wrong" in result.content
 
 
@@ -196,7 +223,7 @@ async def test_end_session_not_offered_cannot_be_called(store):
     [
         ("end_session", {"reason": "bored"}, "must be one of"),
         ("end_session", {}, "missing: reason"),
-        ("save_message", {"body": ""}, "missing: body"),
+        ("save_message", {"contact": "this number", "body": ""}, "missing: body"),
         ("save_message", {"body": 42}, "must be a string"),
         ("save_message", {"body": "x" * 2001}, "too long"),
         ("save_message", {"body": "hi", "phone": "123"}, "unknown field"),

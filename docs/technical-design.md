@@ -200,7 +200,8 @@ class Storage(Protocol):
     async def create_session(self, caller_id: int, start: SessionStart) -> int: ...
     async def end_session(self, session_id: int, reason: str, summary: str | None) -> None: ...
     async def add_turn(self, session_id: int, turn: TurnRow) -> None: ...
-    async def save_message(self, session_id: int, msg: MessageRow) -> int: ...
+    async def save_message(self, session_id: int, msg: MessageRow) -> int: ...  # or replace
+    async def session_message(self, session_id: int) -> MessageRow | None: ...
     async def mark_message_notified(self, message_id: int) -> None: ...
     async def count_sessions_since(
         self, since: datetime, caller_id: int | None = None
@@ -260,10 +261,11 @@ sequenceDiagram
 2. Close STT.
 3. Hang up through `adapter.end_session()`, unless the caller already did.
 4. `summarize` the transcript (Haiku, non-streaming), only if the caller said something, then `storage.end_session(reason, summary)`. This runs in the session's own task, so it never delays another call.
+5. If a message was left, email it: `notifier.message_left(...)` with its final version, the caller's latest name and the ended session (summary included), then `mark_message_notified`. One email per call, sent after the caller has gone, so it never slows the call. If the email fails, the message stays saved and unsent (`notified_at` empty).
 
 On shutdown, the registry stops admitting, sends every live session `on_session_end("shutdown")` so it ends the normal way, and cancels any still running after 10 s.
 
-Turns are stored as they happen, so a crash loses at most the summary.
+Turns and the message are stored as they happen, so a crash loses at most the summary and the end-of-call email (the message stays saved, unsent; sending those at startup comes with step 5).
 
 ---
 
@@ -420,7 +422,7 @@ All tools use `strict: true`, with `tool_choice` left as `auto`. Forced tool cho
 
 | Tool | Input schema | Handler |
 | --- | --- | --- |
-| `save_message` | `{body: string, contact?: string}` | Who it's from always comes from the caller record, never the model: the saved name (set via `save_caller_details`) and the number the call came from. `contact` is only an extra way to reach them (an email, another number). An anonymous caller has no number, so a call without `contact` returns an `is_error` asking the model to ask; `"declined"` is accepted. Then `storage.save_message`, `notifier.message_left(...)` immediately, and `mark_message_notified`. Return `{"saved": true}`. If the email fails the message stays saved (unsent on the admin page) and the result is still `saved`; if saving fails, an `is_error` result. |
+| `save_message` | `{body: string, contact: string}` | Who it's from always comes from the caller record, never the model: the saved name (set via `save_caller_details`) and the number the call came from. `contact` is required, so the model decides every time (on a real call it left out an email the caller had spelled and confirmed): the email or number the caller gave, `"this number"` (stored as no extra contact) or `"declined"`. An anonymous caller has no number, so `"this number"` returns an `is_error` asking the model to ask. Then `storage.save_message`, which saves the session's one message or replaces it: calling again with the full updated message is how the caller adds to or corrects it. Nothing is emailed here; the session emails the final version when the call ends (§5, end of a session). Return `{"saved": true}`; if saving fails, an `is_error` result. |
 | `save_caller_details` | `{name?: string, company?: string, reason?: string}` | Used when the caller gives their name (answering the name question, or offering it unprompted), corrects a name we have wrong ("Actually, I'm not Sam, I'm Alex"), or mentions their company or reason for calling. `storage.set_caller_details`; omitted fields keep their stored value. Rejects a name that fails the name check (§8.4) with an `is_error` result. Return `{"ok": true}`. |
 | `end_session` | `{reason: "goodbye" \| "abuse" \| "limit"}` | Set the session to end once the current spoken text finishes playing. The turn makes no further LLM request. Return `{"ok": true}`. |
 
@@ -528,14 +530,15 @@ CREATE TABLE messages (
   notified_at TEXT
 );
 
--- plus indexes: sessions(caller_id, started_at), sessions(started_at), messages(session_id),
--- and UNIQUE(session_id, seq) on turns
+-- plus indexes: sessions(caller_id, started_at), sessions(started_at),
+-- UNIQUE(session_id, seq) on turns, and UNIQUE(session_id) on messages
+-- (0002_one_message_per_session.sql: one message per call, replaced as it's edited)
 ```
 
 - Timestamps are ISO-8601 UTC text.
 - Tool calls are stored as `speaker='tool'` turns (name plus JSON input), so the admin page shows them in place.
 - Set `PRAGMA journal_mode=WAL` and `foreign_keys=ON` on connect.
-- `storage/migrate.py` applies `migrations/NNNN_*.sql` files in order, each file plus its version bump in one transaction, and owns the `schema_version` table. `SqliteStorage.open()` runs it at startup. v1 adds `0002_sms.sql` (the spec's texting columns plus a `texts` table).
+- `storage/migrate.py` applies `migrations/NNNN_*.sql` files in order, each file plus its version bump in one transaction, and owns the `schema_version` table. `SqliteStorage.open()` runs it at startup. v1 adds an SMS migration (the spec's texting columns plus a `texts` table).
 
 ### 11.2 Writes during a call
 Every turn is written as it completes (spec: dropped calls keep their transcript). With one connection and WAL mode, writes take about a millisecond, which is no concern at 2 concurrent sessions.
@@ -597,7 +600,7 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 2. ✅ **Core turn engine on fakes:** state machine, sentence splitter, history, barge-in, filler, tools, plus the registry with its caps and the session summary. The integration tests are the definition of done.
 3. ✅ **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate. Result: warm turns about 0.9–2.0 s from the caller stopping to the first audio (plus the phone network), most of it Claude; the cache hits on every turn after the prewarm. Also added along the way: the goodbye hold, spelling, pronunciations, the prewarm and the IPv4 retry.
 4. **Twilio adapter:** webhook, stream, marks and clear, fallback URL. First real call.
-5. **Messages and email:** `save_message` → Gmail.
+5. **Messages and email:** the Gmail notifier for the end-of-call email, and sending any message left unsent (after a crash) at startup.
 6. **Admin page.**
 7. **Warm intro, clips script.** (Caps, the session summary and anonymous handling were done in step 2.)
 8. **Run the acceptance checklist on real calls.** Tune latency.

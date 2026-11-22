@@ -20,7 +20,8 @@ caller who remembers one more thing isn't cut off: real words in that time carry
 on, and silence or a "mm-hm" lets it end. Most callers hang up themselves first. An abusive
 caller is hung up on straight away.
 
-Turn rows are written as they happen, so a crash loses at most the summary.
+Turn rows and the message are written as they happen, so a crash loses at most the summary
+and the end-of-call email (the message stays saved, unsent).
 """
 
 from __future__ import annotations
@@ -243,7 +244,7 @@ class Session:
         row = SessionRow(
             self._session_id, caller.id, start.channel, start.channel_ref, now, None, None, None
         )
-        self._tool_ctx = ToolContext(d.storage, d.notifier, row, caller, clock=d.clock)
+        self._tool_ctx = ToolContext(d.storage, row, caller, clock=d.clock)
         self._stt = await d.stt.open(start.sample_rate)
         return opening.text
 
@@ -472,7 +473,30 @@ class Session:
         if self._session_id:
             summary = await self._summarize()
             await _quietly(self._deps.storage.end_session(self._session_id, reason, summary))
+            await self._send_message(reason, summary)
         log.info("session %s ended: %s", self._session_id, reason)
+
+    async def _send_message(self, reason: str, summary: str | None) -> None:
+        """Email the call's message, if one was left, once the call is over: the final
+        version, however many times it was replaced, with the call's summary. If the email
+        fails the message stays saved and unsent (notified_at empty) for the owner to see."""
+        ctx = self._tool_ctx
+        if ctx is None:
+            return
+        try:
+            msg = await self._deps.storage.session_message(self._session_id)
+            if msg is None or msg.id is None or msg.notified_at is not None:
+                return
+            message_id = msg.id
+            # The name the caller gave last, even if they gave it after the message.
+            msg = replace(msg, name=ctx.caller.name or msg.name)
+            ended = replace(
+                ctx.session, ended_at=self._deps.clock(), end_reason=reason, summary=summary
+            )
+            await self._deps.notifier.message_left(msg, ctx.caller, ended)
+            await self._deps.storage.mark_message_notified(message_id)
+        except Exception:
+            log.exception("message for session %s saved but not emailed", self._session_id)
 
     async def _settle_last(self, turn: Turn, clear_audio: bool) -> None:
         """Stop and store the turn still running at the end, keeping the end reason."""

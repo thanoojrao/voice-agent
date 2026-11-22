@@ -192,14 +192,34 @@ class SqliteStorage:
             await self._db.commit()
 
     async def save_message(self, session_id: int, msg: MessageRow) -> int:
+        """Save the session's message, or replace it if it already has one (one per
+        session). `created_at` stays the time of the first save. Returns the message id."""
         async with self._write:
             cur = await self._db.execute(
                 "INSERT INTO messages (session_id, name, contact, body, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (session_id) DO UPDATE SET "
+                "name = excluded.name, contact = excluded.contact, body = excluded.body "
+                "RETURNING id",
                 (session_id, msg.name, msg.contact, msg.body, _ts(msg.created_at)),
             )
+            (message_id,) = await _one(cur)
             await self._db.commit()
-            return _new_id(cur)
+            return message_id
+
+    async def session_message(self, session_id: int) -> MessageRow | None:
+        cur = await self._db.execute(
+            "SELECT id, name, contact, body, created_at, notified_at FROM messages "
+            "WHERE session_id = ?",
+            (session_id,),
+        )
+        r = await cur.fetchone()
+        if r is None:
+            return None
+        return MessageRow(
+            body=r["body"], created_at=_dt(r["created_at"]), name=r["name"],
+            contact=r["contact"], id=r["id"], notified_at=_dt_opt(r["notified_at"]),
+        )  # fmt: skip
 
     async def mark_message_notified(self, message_id: int) -> None:
         async with self._write:

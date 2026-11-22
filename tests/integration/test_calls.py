@@ -3,7 +3,7 @@
 Registry -> Session -> Turn -> tools, with the real prompt (built from kb.example), real
 SQLite, and fakes only at the edges (phone, speech-to-text, model, text-to-speech, email).
 Unit tests cover each module; these cover what only shows up when they're joined: a name
-saved in one call greeting the caller in the next, a message reaching the email, the
+saved in one call greeting the caller in the next, a message emailed when the call ends, the
 registry freeing a place when a call ends.
 """
 
@@ -184,7 +184,12 @@ async def test_a_caller_is_remembered_from_one_call_to_the_next(store):
             # call 1
             uses("save_caller_details", name="Sam", company="Acme"),
             says("Nice to meet you, Sam. How can I help?"),
-            uses("save_message", "I'll pass that on. ", body="Please call Sam back."),
+            uses(
+                "save_message",
+                "I'll pass that on. ",
+                body="Please call Sam back.",
+                contact="this number",
+            ),
             says("Done. Anything else?"),
             uses("end_session", "Thanks for calling, bye!", reason="goodbye"),
             # call 2
@@ -209,9 +214,14 @@ async def test_a_caller_is_remembered_from_one_call_to_the_next(store):
     assert system[1].cache and "<knowledge_base>" in system[1].text
     assert "name is unknown" in system[2].text
 
-    # The message reached the owner with the caller's saved name and number.
-    [(message, caller, _)] = line.notifier.messages
+    # The message reached the owner once the call ended, with the caller's saved name and
+    # number, and the call's summary.
+    [(message, caller, session)] = line.notifier.messages
     assert (message.name, message.body, caller.address) == ("Sam", "Please call Sam back.", SAM)
+    assert (session.end_reason, session.summary) == (
+        "goodbye",
+        "Sam from Acme asked for a call back.",
+    )
     assert await line.rows("SELECT notified_at IS NOT NULL FROM messages") == [(1,)]
 
     second = await line.dial(SAM)
@@ -236,7 +246,8 @@ async def test_anonymous_caller_is_asked_how_to_reach_them_before_a_message_save
     line = Line(
         store,
         [
-            uses("save_message", body="Interested in the widget."),  # refused: no contact
+            # refused: an anonymous caller has no number to call back
+            uses("save_message", body="Interested in the widget.", contact="this number"),
             says("Sure. What's the best way to reach you?"),
             uses("save_message", body="Interested in the widget.", contact="sam@example.com"),
             says("Got it, I'll pass that on."),
@@ -250,13 +261,59 @@ async def test_anonymous_caller_is_asked_how_to_reach_them_before_a_message_save
 
     refused = line.llm.calls[1].history[-1].parts[-1]
     assert isinstance(refused, ToolResultPart) and refused.is_error
-    [(message, caller, _)] = line.notifier.messages
-    assert (message.contact, caller.address) == ("sam@example.com", None)
+    assert line.notifier.messages == []  # sent when the call ends, not before
 
     await call.adapter.hang_up()
     await call.ended()
+    [(message, caller, _)] = line.notifier.messages
+    assert (message.contact, caller.address) == ("sam@example.com", None)
     tools = await line.rows("SELECT text FROM turns WHERE speaker = 'tool' ORDER BY seq")
     assert len(tools) == 2
+
+
+async def test_a_message_added_to_mid_call_is_emailed_once_in_its_final_form(store):
+    line = Line(
+        store,
+        [
+            uses("save_message", body="Call me about the role.", contact="this number"),
+            says("Saved. Anything else?"),
+            uses(
+                "save_message",
+                body="Call me about the role. I'm free after 3.",
+                contact="this number",
+            ),
+            says("Updated."),
+            uses("save_caller_details", name="Sam"),
+            says("Thanks, Sam."),
+        ],
+    )
+    call = await line.dial(SAM)
+    call.say("Tell Alex to call me about the role.")
+    await call.idle(turn=2)
+    call.say("Oh, and I'm free after 3.")
+    await call.idle(turn=3)
+    call.say("I'm Sam, by the way.")  # the name comes after the message
+    await call.idle(turn=4)
+    await call.adapter.hang_up()
+    await call.ended()
+
+    [(message, _, session)] = line.notifier.messages
+    assert (message.name, message.body) == ("Sam", "Call me about the role. I'm free after 3.")
+    assert session.end_reason == "caller_hangup"
+    assert await line.rows("SELECT notified_at IS NOT NULL FROM messages") == [(1,)]
+
+
+async def test_a_message_that_fails_to_email_stays_saved_and_unsent(store):
+    line = Line(
+        store, [uses("save_message", body="Call me.", contact="this number"), says("Saved.")]
+    )
+    line.notifier.fail = True
+    call = await line.dial(SAM)
+    call.say("Ask Alex to call me.")
+    await call.idle(turn=2)
+    await call.adapter.hang_up()
+    await call.ended()
+    assert await line.rows("SELECT body, notified_at FROM messages") == [("Call me.", None)]
 
 
 async def test_slow_answer_gets_a_filler_and_a_barge_in_trims_it(store):

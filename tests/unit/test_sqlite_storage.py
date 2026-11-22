@@ -181,6 +181,29 @@ async def test_message_saved_then_marked_notified(store, clock, tmp_path):
     assert datetime.fromisoformat(notified) == T0 + timedelta(seconds=4)
 
 
+async def test_saving_again_replaces_the_sessions_message(store, clock):
+    _, sid = await new_session(store)
+    first = await store.save_message(sid, MessageRow("call me back", T0, "Ann", None))
+    clock.advance(seconds=30)
+    later = T0 + timedelta(seconds=30)
+    second = await store.save_message(sid, MessageRow("call me after 3", later, "Ann", "a@x.io"))
+    assert second == first
+    msg = await store.session_message(sid)
+    assert msg is not None
+    assert (msg.id, msg.body, msg.contact, msg.notified_at) == (
+        first,
+        "call me after 3",
+        "a@x.io",
+        None,
+    )
+    assert msg.created_at == T0  # when it was first left
+
+
+async def test_session_without_a_message(store):
+    _, sid = await new_session(store)
+    assert await store.session_message(sid) is None
+
+
 # -- persistence -----------------------------------------------------------
 
 

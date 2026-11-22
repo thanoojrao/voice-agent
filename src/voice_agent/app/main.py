@@ -217,7 +217,7 @@ class _RegistryHandle:
 
 class _LogNotifier:
     """Stands in until the Gmail notifier (build step 5). Messages are still saved; raising
-    here leaves them marked not-notified, which is the truth."""
+    here at the end of the call leaves them marked not-notified, which is the truth."""
 
     async def message_left(self, msg: MessageRow, caller: Caller, session: SessionRow) -> None:
         raise RuntimeError("email isn't set up yet (build step 5); the message is saved")

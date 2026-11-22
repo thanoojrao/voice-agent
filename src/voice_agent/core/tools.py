@@ -1,6 +1,6 @@
 """The tools the model can call during a session, and what happens when it does.
 
-- save_message:        take a message for the owner; saved, then emailed right away
+- save_message:        take a message for the owner, or replace it; emailed when the call ends
 - save_caller_details: save or correct the caller's name, company and reason for calling
 - end_session:         hang up once the closing line has been spoken
 
@@ -27,7 +27,6 @@ from voice_agent.core.greeting import usable_name
 from voice_agent.core.interfaces import (
     Caller,
     MessageRow,
-    Notifier,
     SessionRow,
     Storage,
     ToolCall,
@@ -38,6 +37,10 @@ from voice_agent.core.interfaces import (
 log = logging.getLogger(__name__)
 
 END_REASONS = ("goodbye", "abuse", "limit")
+# save_message `contact` values that aren't an address. Required, so the model has to decide
+# every time: on a real call it left out an email the caller had spelled and confirmed.
+THIS_NUMBER = "this number"  # call back on the number they're calling from
+DECLINED = "declined"  # they wouldn't say how to reach them
 
 
 @dataclass
@@ -45,7 +48,6 @@ class ToolContext:
     """What the handlers need about this session. One per session, owned by the session."""
 
     storage: Storage
-    notifier: Notifier
     session: SessionRow
     caller: Caller  # kept up to date when save_caller_details runs
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
@@ -69,21 +71,24 @@ def _schema(properties: dict[str, dict[str, Any]], required: list[str]) -> dict[
 SAVE_MESSAGE = ToolDef(
     name="save_message",
     description=(
-        "Save a message for the real me and email it to me right away. Only call this after "
-        "reading the message back to the caller and hearing them confirm it. "
+        "Save the caller's message for the real me. Call it once the message is confirmed and "
+        "you know how to reach them. If they add to or change the message afterwards, call it "
+        "again with the full updated message: it replaces the earlier one. "
         "`body` is the message in the caller's own words, tidied up. "
         "The caller's saved name and number are attached automatically: if they tell you "
         "their name now, call save_caller_details first. "
-        "`contact` is only for a way to reach them that I don't already have: an email or "
-        "another number they asked me to use. When the caller is anonymous I have no number, "
-        'so ask how to reach them; if they won\'t say, send contact "declined".'
+        "`contact` is how the real me should reach them: the email address or phone number "
+        "they gave during this call, exactly as they confirmed it; or "
+        f"\"{THIS_NUMBER}\" if they're happy to be called back on the number they're calling "
+        f'from; or "{DECLINED}" if they won\'t say. When the caller is anonymous I have no '
+        f'number, so "{THIS_NUMBER}" doesn\'t work: ask how to reach them.'
     ),
     input_schema=_schema(
         {
             "contact": {"type": "string", "maxLength": 200},
             "body": {"type": "string", "maxLength": 2000},
         },
-        required=["body"],
+        required=["contact", "body"],
     ),
 )
 
@@ -204,35 +209,35 @@ def check_input(schema: dict[str, Any], raw: object) -> dict[str, str]:
 
 
 async def save_message(args: dict[str, str], ctx: ToolContext) -> dict[str, Any]:
-    """Save first, then email.
+    """Save the session's message, or replace it: one message per session, emailed by the
+    session when the call ends (core/session.py). So the caller can add to it or correct it
+    without a second email, and sending never slows the call down. A message is scoped to
+    this session by `ctx.session`; the model never names one, so it can't touch another.
 
     Who it's from comes from the caller record, never from the model: the name saved via
     save_caller_details, and the number the call came from (the email shows it from
-    `ctx.caller`). `contact` holds only an extra way to reach them. An anonymous caller has
-    no number, so a message without contact is refused until the model has asked
+    `ctx.caller`). `contact` is required: an address the caller gave, THIS_NUMBER (stored
+    as no extra contact, since the number is on the caller record) or DECLINED. An
+    anonymous caller has no number, so THIS_NUMBER is refused until the model has asked
     ("declined" is accepted, so the caller can still say no).
-
-    If the email fails the message is still saved (and shows as not notified on the admin
-    page), so the caller is told it was taken either way.
     """
-    contact = args.get("contact")
-    if ctx.caller.address is None and contact is None:
-        raise ToolInputError(
-            "The caller is anonymous, so I have no number for them. Ask how the real me can "
-            'reach them (phone or email). If they won\'t say, call again with contact "declined".'
-        )
+    contact: str | None = args["contact"]
+    if contact.lower() == DECLINED:
+        contact = DECLINED
+    elif contact.lower() == THIS_NUMBER:
+        if ctx.caller.address is None:
+            raise ToolInputError(
+                "The caller is anonymous, so I have no number for them. Ask how the real me "
+                f'can reach them (phone or email). If they won\'t say, use "{DECLINED}".'
+            )
+        contact = None
     msg = MessageRow(
         body=args["body"],
         created_at=ctx.clock(),
         name=ctx.caller.name,
         contact=contact,
     )
-    message_id = await ctx.storage.save_message(ctx.session.id, msg)
-    try:
-        await ctx.notifier.message_left(replace(msg, id=message_id), ctx.caller, ctx.session)
-        await ctx.storage.mark_message_notified(message_id)
-    except Exception:
-        log.exception("message %s saved but the email failed", message_id)
+    await ctx.storage.save_message(ctx.session.id, msg)
     return {"saved": True}
 
 

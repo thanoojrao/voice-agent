@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tests.fakes import FakeLLM, FakeNotifier, FakeTTS, FakeVoiceAdapter, Reply
+from tests.fakes import FakeLLM, FakeTTS, FakeVoiceAdapter, Reply
 from voice_agent.core.clips import Clip, Clips
 from voice_agent.core.history import CUT_OFF, History
 from voice_agent.core.interfaces import (
@@ -68,7 +68,7 @@ async def ctx(tmp_path):
         caller.id, SessionStart("twilio", "CA1", caller.address, 8000)
     )
     session = SessionRow(session_id, caller.id, "twilio", "CA1", NOW, None, None, None)
-    yield ToolContext(store, FakeNotifier(), session, caller, clock=lambda: NOW)
+    yield ToolContext(store, session, caller, clock=lambda: NOW)
     await store.close()
 
 
@@ -189,7 +189,9 @@ async def test_no_filler_when_the_reply_is_fast(ctx):
 
 
 async def test_tool_call_runs_between_requests_and_the_reply_continues(ctx):
-    call = ToolCall("tu_1", "save_message", {"body": "Please call me back."})
+    call = ToolCall(
+        "tu_1", "save_message", {"body": "Please call me back.", "contact": "this number"}
+    )
     rig = Rig(
         ctx,
         [
@@ -200,9 +202,11 @@ async def test_tool_call_runs_between_requests_and_the_reply_continues(ctx):
     result = await rig.run()
 
     assert rig.tts.spoken == ["Sure, I'll pass that on.", "Done.", "Anything else?"]
-    assert len(ctx.notifier.messages) == 1  # type: ignore[attr-defined]
+    assert await ctx.storage.session_message(ctx.session.id) is not None
     [run] = result.tool_runs
-    assert run.call == ToolUsePart("tu_1", "save_message", {"body": "Please call me back."})
+    assert run.call == ToolUsePart(
+        "tu_1", "save_message", {"body": "Please call me back.", "contact": "this number"}
+    )
     assert not run.result.is_error
     # The second request saw the tool call and its result.
     second = rig.llm.calls[1].history
