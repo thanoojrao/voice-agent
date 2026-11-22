@@ -6,11 +6,13 @@
 Run it once before the first call, and again after changing the voice (say, to a clone).
 The clips are WAV files, PCM16 mono at 8 kHz: what the core plays to the phone without
 conversion (core/clips.py checks this at startup), and a format Twilio's <Play> accepts for
-the busy and apology clips it fetches from /static/audio.
+the refusal and apology clips it fetches from /static/audio.
 
-    apology.wav     a provider failed mid-call, or Twilio used the fallback URL
-    filler_*.wav    a reply is slow to start (never added to the transcript)
-    busy.wav        refused at the webhook: too many calls, or a daily cap
+    apology.wav       a provider failed mid-call, or Twilio used the fallback URL
+    filler_*.wav      a reply is slow to start (never added to the transcript)
+    busy.wav          refused at the webhook: already on the most calls at once
+    limit_caller.wav  refused: this number has used its calls for the day
+    limit_daily.wav   refused: the daily cap for all callers is reached
 
 Calls Cartesia once per clip; the whole set costs a fraction of a cent. CARTESIA_API_KEY
 comes from .env.
@@ -37,9 +39,15 @@ def clip_lines(owner_name: str) -> dict[str, str]:
     lines = {
         "apology": "Sorry, I'm having some trouble on my end right now. "
         "Please try calling back in a little while.",
-        # Heard instead of the greeting, so it carries the AI disclosure too.
-        "busy": f"Hi, this is {owner_name}'s AI. I can't take a call right now. "
-        "Please try again a bit later.",
+        # Heard instead of the greeting when a call is refused, so each carries the AI
+        # disclosure too, and says why: a caller who hears only "can't take a call" keeps
+        # retrying and thinks it's broken.
+        "busy": f"Hi, this is {owner_name}'s AI. I'm on another call right now. "
+        "Please try again in a few minutes.",
+        "limit_caller": f"Hi, this is {owner_name}'s AI. You've reached the limit of calls "
+        "I can take from one number today. Please try again tomorrow.",
+        "limit_daily": f"Hi, this is {owner_name}'s AI. I've reached my limit of calls for "
+        "today. Please try again tomorrow.",
     }
     for n, text in enumerate(FILLERS, start=1):
         lines[f"filler_{n}"] = text

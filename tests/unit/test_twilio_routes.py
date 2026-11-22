@@ -140,12 +140,28 @@ def test_blocked_number_is_rejected():
     assert [child.tag for child in fromstring(response.text)] == ["Reject"]
 
 
-@pytest.mark.parametrize("refusal", [Refusal.CONCURRENT, Refusal.DAILY_CAP, Refusal.CALLER_CAP])
-def test_refused_call_hears_the_busy_clip(refusal):
+@pytest.mark.parametrize(
+    ("refusal", "clip"),
+    [
+        (Refusal.CONCURRENT, "busy.wav"),
+        (Refusal.CALLER_CAP, "limit_caller.wav"),
+        (Refusal.DAILY_CAP, "limit_daily.wav"),
+    ],
+)
+def test_refused_call_hears_why(refusal, clip):
     response = post_voice(client_for(FakeRegistry(refusal)), call_form())
     root = fromstring(response.text)
     assert [child.tag for child in root] == ["Play", "Hangup"]
-    assert root[0].text == BASE + "/static/audio/busy.wav"
+    assert root[0].text == f"{BASE}/static/audio/{clip}"
+
+
+def test_every_refusal_except_blocked_has_a_clip_the_script_renders():
+    from scripts.generate_clips import clip_lines
+    from voice_agent.adapters.twilio.routes import REFUSAL_CLIP_PATHS
+
+    assert set(REFUSAL_CLIP_PATHS) == set(Refusal) - {Refusal.BLOCKED}
+    rendered = {f"/static/audio/{name}.wav" for name in clip_lines("Alex")}
+    assert set(REFUSAL_CLIP_PATHS.values()) <= rendered
 
 
 def test_public_base_url_must_be_https():

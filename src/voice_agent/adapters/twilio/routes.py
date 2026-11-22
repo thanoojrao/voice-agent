@@ -39,6 +39,13 @@ STREAM_PATH = "/twilio/stream"
 FALLBACK_PATH = "/twilio/fallback"
 BUSY_CLIP_PATH = "/static/audio/busy.wav"
 APOLOGY_CLIP_PATH = "/static/audio/apology.wav"
+# Each refusal says why, so a capped caller doesn't think the line is broken. Anything not
+# listed (a refusal added later) gets the busy clip.
+REFUSAL_CLIP_PATHS = {
+    Refusal.CONCURRENT: BUSY_CLIP_PATH,
+    Refusal.CALLER_CAP: "/static/audio/limit_caller.wav",
+    Refusal.DAILY_CAP: "/static/audio/limit_daily.wav",
+}
 
 _SIGNATURE_HEADER = "x-twilio-signature"
 _POLICY_VIOLATION = 1008  # WebSocket close code for a refused handshake
@@ -95,8 +102,9 @@ def twilio_router(
             log.info("call %s: blocked number rejected", call_sid)
             return _twiml(twiml.reject())
         if isinstance(admitted, Refusal):
-            log.info("call %s: busy (%s)", call_sid, admitted)
-            return _twiml(twiml.play_then_hangup(base + BUSY_CLIP_PATH))
+            log.info("call %s: refused (%s)", call_sid, admitted)
+            clip = REFUSAL_CLIP_PATHS.get(admitted, BUSY_CLIP_PATH)
+            return _twiml(twiml.play_then_hangup(base + clip))
         params = {PARAM_FROM: address or "", PARAM_TOKEN: admitted.token}
         return _twiml(twiml.stream(stream_url, params))
 
