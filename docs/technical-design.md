@@ -600,7 +600,7 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 1. ✅ **Skeleton:** uv project, config loading, constants, migrations, storage, and the interfaces with their fakes. Tests pass on an empty core.
 2. ✅ **Core turn engine on fakes:** state machine, sentence splitter, history, barge-in, filler, tools, plus the registry with its caps and the session summary. The integration tests are the definition of done.
 3. ✅ **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate. Result: warm turns about 0.9–2.0 s from the caller stopping to the first audio (plus the phone network), most of it Claude; the cache hits on every turn after the prewarm. Also added along the way: the goodbye hold, spelling, pronunciations, the prewarm and the IPv4 retry.
-4. **Twilio adapter:** webhook, stream, marks and clear, fallback URL. First real call.
+4. ✅ **Twilio adapter:** webhook, stream, marks and clear, fallback URL. Real calls work end to end (greeting, answers, barge-in, messages, hang-up); the stream's handshake signature is enforced, refused calls hear why, and the owner's numbers skip the per-caller cap.
 5. ✅ **Messages and email:** the Gmail notifier (`notify/gmail.py`, SMTP on port 465 with an app password) for the end-of-call email and alerts, and sending any message left unsent at startup.
 6. **Admin page.**
 7. **Warm intro, clips script.** (Caps, the session summary and anonymous handling were done in step 2.)
