@@ -1,0 +1,28 @@
+# Kept out of the image. Everything else in the folder goes in, including the gitignored
+# kb/ and assets/audio/, which the agent needs at runtime (see the Dockerfile).
+
+# Secrets: set them as host secrets instead (fly secrets set)
+.env
+.env.*
+!.env.example
+
+# The database lives on a mounted volume, not in the image
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Local environment and caches: rebuilt inside the image
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+
+# Not needed to run the agent
+tests/
+evals/
+docs/
+kb.example/
+scripts/

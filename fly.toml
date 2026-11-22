@@ -1,0 +1,46 @@
+# Fly.io deployment (design doc §14). Deploy with `fly deploy`; secrets with `fly secrets set`.
+#
+# One always-on Machine in Ashburn, Virginia: next to Twilio's US media servers, and a live
+# call can't wait for a cold start. 512 MB fits the app and keeps it within Fly's free $5 a
+# month; raise `memory` if the metrics show it's tight.
+
+# The app name is chosen at `fly launch` / `fly apps create`; it's also the
+# https://<app>.fly.dev address Twilio calls.
+app = "thanooj-voice-agent"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Never sleep, never scale to zero: a ringing call must find the server up.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    # Twilio's webhook is a request, its media stream a long-lived WebSocket. The app caps
+    # calls itself (max_concurrent_sessions); these limits only stop runaway traffic.
+    type = "connections"
+    soft_limit = 20
+    hard_limit = 25
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/healthz"
+
+# The database: a volume, so calls, messages and caller details survive deploys.
+[mounts]
+  source = "voice_agent_data"
+  destination = "/app/data"
+  initial_size = "1gb"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

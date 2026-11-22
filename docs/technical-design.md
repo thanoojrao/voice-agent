@@ -571,6 +571,8 @@ v0 has no hot reload. Changing config or the knowledge base means a restart or r
 
 - **Single process, single uvicorn worker.** The session registry, stream tokens and concurrency count live in memory. Two workers would split them. One worker easily handles 2 concurrent sessions, since the work is I/O-bound.
 - **Docker.** One `Dockerfile` (python:3.13-slim + uv) and a volume mounted at `/app/data` for `agent.db`. The host must be always on, with a persistent disk, in a US region (spec D26).
+- **Hosting: Fly.io.** One always-on Machine (`fly.toml`: 512 MB, shared CPU, `auto_stop_machines = "off"`) in `iad` (Ashburn, Virginia), next to Twilio's US media servers, with a 1 GB volume at `/app/data`. It fits in Fly's $5 monthly free usage (about $3.84). Fly's proxy terminates HTTPS and forwards HTTP to uvicorn on port 8080, WebSockets included. The image includes the real `kb/` and the voice clips (gitignored, but not dockerignored); it goes to Fly's private registry, never to GitHub. Secrets are Fly secrets (`fly secrets import` from `.env`, with `PUBLIC_BASE_URL=https://<app>.fly.dev`). The Twilio number's voice webhook and fallback point at that address.
+- **Deploying.** `fly deploy --ha=false` builds on Fly's servers and replaces the Machine (`--ha=false` keeps it to one: two would split the registry and can't share the volume). A deploy drops any call in progress, so deploy when nobody is likely to be calling.
 - **Without a phone.** `uv run python scripts/try_pipeline.py --say "…" "…"` (or `--wav`) runs real Flux → Claude → Cartesia, prints per-turn latency and cache tokens, and saves each reply as a WAV. `--record` saves the raw provider messages (no audio, no keys); `--cold` skips the prewarm.
 - **Time zone.** The session's clock is New York time. Windows Python has no time-zone data, so the app needs the `tzdata` package.
 - **Local development.** `uv run uvicorn …` plus a tunnel (ngrok or Cloudflare Tunnel). Point the Twilio number's voice webhook at `https://<tunnel>/twilio/voice` and set `PUBLIC_BASE_URL` to match, since signature validation needs the exact public URL.
@@ -617,5 +619,4 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 | Speak the first clause sooner (the first sentence waits 100–400 ms to finish) | §6.2 | after real calls; measure with the dev script |
 | The model spelling by hand after seeing spelled letters in its history | §8.6 | watch real calls; add a line to `instructions.md` if it happens |
 | Claude's time to first text (0.45–1.6 s); a smaller knowledge base or a host near Anthropic | §8.1 | after deploying |
-| Hosting provider | §14 | Owner decision before the first real-number test |
 | Thinking off vs adaptive at low effort for answer quality | §8.1 | the eval set once the KB exists |
