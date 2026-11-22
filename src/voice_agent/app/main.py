@@ -86,7 +86,7 @@ def create_app() -> FastAPI:
 
     # Everything that can be checked without a network call is loaded now.
     prompt = Prompt(
-        load_instructions(_instruction_values(config)),
+        load_instructions(instruction_values(config)),
         load_knowledge_base(KB_DIR, config.featured_projects),
         config.status_stale_days,
     )
@@ -169,7 +169,7 @@ def create_app() -> FastAPI:
 # -- helpers ------------------------------------------------------------------------------------
 
 
-def _instruction_values(config: AgentConfig) -> dict[str, str]:
+def instruction_values(config: AgentConfig) -> dict[str, str]:
     return {
         "owner_name": config.owner_name,
         "tone": config.tone,
