@@ -105,6 +105,13 @@ def test_speakable_allows_spell_tags_and_emails():
     assert check_speakable("That's <spell>sam@example.com</spell>. Is that right?") is None
 
 
+def test_a_closing_question_doesnt_count_but_a_fourth_sentence_does():
+    assert check_speakable("One. Two. Three. Want to hear more?", max_sentences=3) is None
+    assert check_speakable("One. Two. Three. Four?", max_sentences=3) is None
+    assert check_speakable("One? Two. Three. Four.", max_sentences=3)
+    assert check_speakable("One. Two. Three. Four. More?", max_sentences=3)
+
+
 @pytest.mark.parametrize(
     "text",
     [

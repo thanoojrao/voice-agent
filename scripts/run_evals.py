@@ -316,15 +316,19 @@ def check_spell_tag(text: str) -> str | None:
 
 
 def check_speakable(text: str, max_sentences: int = MAX_ANSWER_SENTENCES) -> str | None:
-    """Short and sayable: at most `max_sentences` sentences, nothing that only reads on a
-    screen. Spell tags and email addresses are allowed, so they're taken out first."""
+    """Short and sayable: at most `max_sentences` sentences of answer, nothing that only
+    reads on a screen. A closing question ("Want to hear more?") isn't counted: offering
+    more is the behaviour we want, not extra length. Spell tags and email addresses are
+    allowed, so they're taken out first."""
     plain = _EMAIL.sub("email", _SPELL.sub("spelled", text))
     m = _NOT_SPEAKABLE.search(plain)
     if m:
         return f"not speakable: {m.group(0).strip()!r}"
     count = sentence_count(plain)
+    if plain.rstrip().endswith("?"):
+        count -= 1
     if count > max_sentences:
-        return f"{count} sentences (max {max_sentences})"
+        return f"{count} sentences before any closing question (max {max_sentences})"
     return None
 
 

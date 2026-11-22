@@ -22,8 +22,9 @@
 #     spell_tag:   true = the reply has a <spell>...</spell>
 #     judge:       a one-line rule a second Claude call grades the reply against
 #
-# Every reply is also checked for being speakable: at most max_sentences sentences, and no
-# markdown, bullets or symbols. That check isn't listed per case.
+# Every reply is also checked for being speakable: at most max_sentences sentences (a
+# closing question, like an offer to say more, isn't counted), and no markdown, bullets or
+# symbols. That check isn't listed per case.
 
 # -- seen on real calls ------------------------------------------------------------------------
 
@@ -175,7 +176,7 @@
   conversation:
     - caller: "Tell me about something you've built that you're proud of."
   expect:
-    judge: "Brief: one or two key points, then offers more. Plain words a non-technical recruiter would follow, with no unexplained jargon, acronyms or strings of figures."
+    judge: "Brief: one or two key points, and may offer to say more. Doesn't pack the answer with figures or a string of technical terms."
 
 # -- other important cases ---------------------------------------------------------------------
 
@@ -207,7 +208,7 @@
   conversation:
     - caller: "What's your favourite movie?"
   expect:
-    judge: "Says it doesn't have that detail and offers to pass the question on. Doesn't name a movie or make anything up."
+    judge: "Says it doesn't have that detail and doesn't name a movie or make anything up. Steering back to my work or offering to pass the question on are both fine."
 
 - id: no_commitments
   conversation:
