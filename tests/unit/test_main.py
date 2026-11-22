@@ -1,6 +1,7 @@
 """The app builds and starts with fake settings, and makes no network calls doing so."""
 
 import wave
+from datetime import UTC, datetime
 from pathlib import Path
 from xml.etree.ElementTree import fromstring
 
@@ -8,7 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 from twilio.request_validator import RequestValidator
 
+from tests.fakes import FakeNotifier
 from voice_agent.app import main
+from voice_agent.app.config import Settings
+from voice_agent.core.interfaces import MessageRow, SessionStart
+from voice_agent.notify.gmail import GmailNotifier
+from voice_agent.storage.sqlite import SqliteStorage
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "https://agent.example.com"
@@ -84,3 +90,69 @@ def test_missing_clips_stop_startup(env, monkeypatch):
 def test_owner_clock_is_new_york_time():
     assert main.owner_clock().tzinfo == main.OWNER_TZ
     assert str(main.OWNER_TZ) == "America/New_York"
+
+
+# -- email --------------------------------------------------------------------------------------
+
+GMAIL_ENV = {
+    "GMAIL_ADDRESS": "bot@example.com",
+    "GMAIL_APP_PASSWORD": "abcd efgh ijkl mnop",
+    "OWNER_EMAIL": "owner@example.com",
+}
+
+
+def settings_with(monkeypatch, tmp_path, **env) -> Settings:
+    monkeypatch.chdir(tmp_path)  # no .env here, so only what's set below
+    for name in GMAIL_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return Settings()
+
+
+def test_email_is_off_until_set_up(monkeypatch, tmp_path):
+    assert main.gmail_notifier(settings_with(monkeypatch, tmp_path)) is None
+
+
+def test_gmail_is_used_when_all_three_are_set(monkeypatch, tmp_path):
+    notifier = main.gmail_notifier(settings_with(monkeypatch, tmp_path, **GMAIL_ENV))
+    assert isinstance(notifier, GmailNotifier)
+
+
+def test_email_half_set_up_stops_startup(monkeypatch, tmp_path):
+    env = {k: v for k, v in GMAIL_ENV.items() if k != "OWNER_EMAIL"}
+    with pytest.raises(RuntimeError, match="OWNER_EMAIL"):
+        main.gmail_notifier(settings_with(monkeypatch, tmp_path, **env))
+
+
+def test_app_starts_with_email_set_up(env, monkeypatch):
+    for name, value in GMAIL_ENV.items():
+        monkeypatch.setenv(name, value)
+    with TestClient(main.create_app()) as client:  # nothing unsent, so no SMTP connection
+        assert client.get("/healthz").text == "ok"
+
+
+async def test_unsent_messages_are_sent_and_marked_and_a_failure_stays_unsent(tmp_path):
+    store = await SqliteStorage.open(tmp_path / "agent.db")
+    try:
+        caller = await store.get_or_create_caller("twilio", "+15550100")
+        start = SessionStart("twilio", "CA1", "+15550100", 8000)
+        old = await store.create_session(caller.id, start)
+        await store.save_message(old, MessageRow("call me back", datetime.now(UTC)))
+        await store.set_caller_details(caller.id, "Sam", None, None)  # named after the message
+
+        await main.send_unsent_messages(store, FakeNotifier(fail=True))
+        assert len(await store.unsent_messages()) == 1  # still waiting
+
+        notifier = FakeNotifier()
+        await main.send_unsent_messages(store, notifier)
+        [(msg, sent_caller, session)] = notifier.messages
+        assert (msg.body, msg.name, sent_caller.name, session.id) == (
+            "call me back",
+            "Sam",
+            "Sam",
+            old,
+        )
+        assert await store.unsent_messages() == []
+    finally:
+        await store.close()

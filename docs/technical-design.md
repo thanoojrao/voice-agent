@@ -203,6 +203,7 @@ class Storage(Protocol):
     async def save_message(self, session_id: int, msg: MessageRow) -> int: ...  # or replace
     async def session_message(self, session_id: int) -> MessageRow | None: ...
     async def mark_message_notified(self, message_id: int) -> None: ...
+    async def unsent_messages(self) -> list[tuple[MessageRow, Caller, SessionRow]]: ...
     async def count_sessions_since(
         self, since: datetime, caller_id: int | None = None
     ) -> int: ...  # the registry counts a rolling 24 hours
@@ -265,7 +266,7 @@ sequenceDiagram
 
 On shutdown, the registry stops admitting, sends every live session `on_session_end("shutdown")` so it ends the normal way, and cancels any still running after 10 s.
 
-Turns and the message are stored as they happen, so a crash loses at most the summary and the end-of-call email (the message stays saved, unsent; sending those at startup comes with step 5).
+Turns and the message are stored as they happen, so a crash loses at most the summary and the end-of-call email (the message stays saved, unsent). At startup, every unsent message is emailed in the background (`send_unsent_messages` in `app/main.py`), so a slow mail server never delays a call; one that fails again stays unsent for the next startup. Email is on when `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD` and `OWNER_EMAIL` are all set, off (messages saved only) when none are, and a startup error when only some are.
 
 ---
 
@@ -600,7 +601,7 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 2. ✅ **Core turn engine on fakes:** state machine, sentence splitter, history, barge-in, filler, tools, plus the registry with its caps and the session summary. The integration tests are the definition of done.
 3. ✅ **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate. Result: warm turns about 0.9–2.0 s from the caller stopping to the first audio (plus the phone network), most of it Claude; the cache hits on every turn after the prewarm. Also added along the way: the goodbye hold, spelling, pronunciations, the prewarm and the IPv4 retry.
 4. **Twilio adapter:** webhook, stream, marks and clear, fallback URL. First real call.
-5. **Messages and email:** the Gmail notifier for the end-of-call email, and sending any message left unsent (after a crash) at startup.
+5. ✅ **Messages and email:** the Gmail notifier (`notify/gmail.py`, SMTP on port 465 with an app password) for the end-of-call email and alerts, and sending any message left unsent at startup.
 6. **Admin page.**
 7. **Warm intro, clips script.** (Caps, the session summary and anonymous handling were done in step 2.)
 8. **Run the acceptance checklist on real calls.** Tune latency.

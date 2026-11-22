@@ -204,6 +204,28 @@ async def test_session_without_a_message(store):
     assert await store.session_message(sid) is None
 
 
+async def test_unsent_messages_come_with_their_caller_and_session_oldest_first(store):
+    ann, sent = await new_session(store)
+    await store.mark_message_notified(await store.save_message(sent, MessageRow("x", T0)))
+    _, crashed = await new_session(store, ref="CA2")  # never ended: the server stopped
+    await store.save_message(crashed, MessageRow("first", T0, "Ann"))
+    bo, failed = await new_session(store, number="+15550199", ref="CA3")
+    await store.end_session(failed, "goodbye", "asked about a role")
+    await store.save_message(failed, MessageRow("second", T0, None, "bo@example.com"))
+
+    unsent = await store.unsent_messages()
+    assert [(m.body, c.id, s.id) for m, c, s in unsent] == [
+        ("first", ann.id, crashed),
+        ("second", bo.id, failed),
+    ]
+    msg, _, session = unsent[1]
+    assert (msg.contact, msg.notified_at, session.summary) == (
+        "bo@example.com",
+        None,
+        "asked about a role",
+    )
+
+
 # -- persistence -----------------------------------------------------------
 
 

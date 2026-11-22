@@ -71,6 +71,13 @@ def _session(r: aiosqlite.Row) -> SessionRow:
     )  # fmt: skip
 
 
+def _message(r: aiosqlite.Row) -> MessageRow:
+    return MessageRow(
+        body=r["body"], created_at=_dt(r["created_at"]), name=r["name"],
+        contact=r["contact"], id=r["id"], notified_at=_dt_opt(r["notified_at"]),
+    )  # fmt: skip
+
+
 class SqliteStorage:
     def __init__(self, conn: aiosqlite.Connection, now: Callable[[], datetime] = utc_now):
         self._db = conn
@@ -214,12 +221,7 @@ class SqliteStorage:
             (session_id,),
         )
         r = await cur.fetchone()
-        if r is None:
-            return None
-        return MessageRow(
-            body=r["body"], created_at=_dt(r["created_at"]), name=r["name"],
-            contact=r["contact"], id=r["id"], notified_at=_dt_opt(r["notified_at"]),
-        )  # fmt: skip
+        return _message(r) if r else None
 
     async def mark_message_notified(self, message_id: int) -> None:
         async with self._write:
@@ -227,3 +229,15 @@ class SqliteStorage:
                 "UPDATE messages SET notified_at = ? WHERE id = ?", (_ts(self._now()), message_id)
             )
             await self._db.commit()
+
+    async def unsent_messages(self) -> list[tuple[MessageRow, Caller, SessionRow]]:
+        """Messages whose email never went out (it failed, or the process stopped before the
+        call ended), oldest first, each with its caller and session for the email."""
+        cur = await self._db.execute("SELECT * FROM messages WHERE notified_at IS NULL ORDER BY id")
+        found = []
+        for r in await cur.fetchall():
+            cur = await self._db.execute("SELECT * FROM sessions WHERE id = ?", (r["session_id"],))
+            session = _session(await _one(cur))
+            cur = await self._db.execute("SELECT * FROM callers WHERE id = ?", (session.caller_id,))
+            found.append((_message(r), _caller(await _one(cur)), session))
+        return found
