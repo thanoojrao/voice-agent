@@ -166,11 +166,12 @@
   expect:
     tool: {name: save_caller_details, args: {name: Sam, company: Acme}}
 
-- id: saves_bare_name
+- id: bare_name_reply
   conversation:
     - caller: "Sam."  # answering the greeting's "Who am I speaking with?"
-  expect:
-    tool: {name: save_caller_details, args: {name: Sam}}
+  expect:  # saving the name is guaranteed by the end-of-call summary (tests/unit/test_session.py)
+    says: '\bSam\b'
+    never_says: "save|caller.details|tool"
 
 - id: plain_words
   conversation:
