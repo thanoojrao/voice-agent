@@ -388,7 +388,7 @@ Twilio plays audio asynchronously. We know what was *sent*, not what was *heard*
 - `stop` / socket closed → `session.on_session_end("caller_hangup")`.
 - Outgoing: `media` (PCM16 → μ-law → base64, 20 ms frames), `mark`, `clear`.
 
-> The one-time token is how the WebSocket is authenticated. Before relying on signature headers on the WS handshake, check Twilio's current docs.
+> The WebSocket has two locks: the handshake's `X-Twilio-Signature`, over the stream URL exactly as the TwiML gave it (`wss://…/twilio/stream`, no trailing slash; confirmed on a real call), is checked and a bad one refused; and the stream must present the one-time token.
 
 ### 7.3 Fallback `POST /twilio/fallback`
 This is configured as the number's fallback URL in the Twilio console. It returns `<Play>` of the apology clip (static WAV) and then `<Hangup/>`. It needs no database or providers, so it works even when the core is broken.
@@ -617,6 +617,5 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 | Speak the first clause sooner (the first sentence waits 100–400 ms to finish) | §6.2 | after real calls; measure with the dev script |
 | The model spelling by hand after seeing spelled letters in its history | §8.6 | watch real calls; add a line to `instructions.md` if it happens |
 | Claude's time to first text (0.45–1.6 s); a smaller knowledge base or a host near Anthropic | §8.1 | after deploying |
-| Whether Twilio signs the Media Stream WS handshake | §7.2 (token covers it either way) | Twilio docs |
 | Hosting provider | §14 | Owner decision before the first real-number test |
 | Thinking off vs adaptive at low effort for answer quality | §8.1 | the eval set once the KB exists |

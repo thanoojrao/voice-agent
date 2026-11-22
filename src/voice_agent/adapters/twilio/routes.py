@@ -8,11 +8,10 @@ Signatures. Twilio signs each request with the account auth token: HMAC-SHA1 of 
 it called plus the sorted POST fields. Behind ngrok or a host's proxy our app sees a local
 URL, so the check is made against PUBLIC_BASE_URL + the path, the address Twilio used.
 
-The stream's real gate is the registry's one-time token (single use, 60 s, only handed out in
-a signed webhook reply). Twilio's docs also say to check the signature on the WebSocket
-handshake, but not exactly which URL form is signed. So the handshake is checked against the
-likely forms and, until a real call shows which one matches, a mismatch is only logged
-(`enforce_stream_signature=False`). Once it's confirmed, turn enforcement on.
+The stream has two locks. Its handshake is signed too, over the stream URL exactly as the
+TwiML gave it (wss://, no trailing slash; confirmed on a real call), and a bad signature is
+refused. And the stream must present the registry's one-time token (single use, 60 s, only
+handed out in a signed webhook reply).
 
 The fallback isn't signature-checked on purpose: it must work when everything else is
 broken, and all it returns is a public apology clip.
@@ -75,8 +74,6 @@ def twilio_router(
     registry: Admission,
     auth_token: str,
     public_base_url: str,
-    *,
-    enforce_stream_signature: bool = False,
 ) -> APIRouter:
     """The Twilio endpoints, bound to this app's registry and settings (built in main.py)."""
     base = public_base_url.rstrip("/")
@@ -111,12 +108,10 @@ def twilio_router(
     @router.websocket(STREAM_PATH)
     async def stream(ws: WebSocket) -> None:
         signature = ws.headers.get(_SIGNATURE_HEADER, "")
-        if not _stream_signature_ok(validator, stream_url, base + STREAM_PATH, signature):
-            if enforce_stream_signature:
-                log.warning("stream handshake with a bad signature refused")
-                await ws.close(code=_POLICY_VIOLATION)
-                return
-            log.warning("stream handshake signature didn't match (not enforced; token checked)")
+        if not validator.validate(stream_url, {}, signature):
+            log.warning("stream handshake with a bad or missing signature refused")
+            await ws.close(code=_POLICY_VIOLATION)
+            return
         await ws.accept()
         await TwilioAdapter(ws, registry.start_session).run()
 
@@ -126,21 +121,6 @@ def twilio_router(
         return _twiml(twiml.play_then_hangup(base + APOLOGY_CLIP_PATH))
 
     return router
-
-
-def _stream_signature_ok(
-    validator: RequestValidator, wss_url: str, https_url: str, signature: str
-) -> bool:
-    """Try the URL forms Twilio might have signed: wss:// or https://, and with a trailing
-    slash (Twilio: "try appending a trailing / character"). Logs which one matched, so the
-    first real call tells us."""
-    if not signature:
-        return False
-    for url in (wss_url, wss_url + "/", https_url, https_url + "/"):
-        if validator.validate(url, {}, signature):
-            log.info("stream handshake signature matched %s", url)
-            return True
-    return False
 
 
 def _text(value: object) -> str | None:

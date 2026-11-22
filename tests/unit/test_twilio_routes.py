@@ -1,5 +1,4 @@
 import json
-import logging
 from typing import Any
 from xml.etree.ElementTree import fromstring
 
@@ -52,9 +51,9 @@ class FakeRegistry:
         return self.session
 
 
-def client_for(registry: FakeRegistry, enforce: bool = False) -> TestClient:
+def client_for(registry: FakeRegistry) -> TestClient:
     app = FastAPI()
-    app.include_router(twilio_router(registry, TOKEN, BASE + "/", enforce_stream_signature=enforce))
+    app.include_router(twilio_router(registry, TOKEN, BASE + "/"))
     return TestClient(app)
 
 
@@ -203,28 +202,26 @@ def run_stream(client: TestClient, signature: str) -> None:
         ws.send_text(json.dumps({"event": "stop", "stop": {}}))
 
 
-@pytest.mark.parametrize(
-    "signed_url",
-    [STREAM_WSS, STREAM_WSS + "/", BASE + "/twilio/stream", BASE + "/twilio/stream/"],
-)
-def test_stream_accepts_any_signed_url_form(signed_url, caplog):
+def test_stream_signed_over_the_wss_url_is_accepted():
+    # The form a real call showed Twilio signs: the TwiML's URL, no trailing slash.
     registry = FakeRegistry()
-    caplog.set_level(logging.INFO)
-    run_stream(client_for(registry, enforce=True), SIGNER.compute_signature(signed_url, {}))
+    run_stream(client_for(registry), SIGNER.compute_signature(STREAM_WSS, {}))
     assert [token for token, _ in registry.started] == ["tok123"]
-    assert f"matched {signed_url}" in caplog.text
     assert registry.session.ended == ["caller_hangup"]
 
 
-def test_bad_stream_signature_is_refused_when_enforced():
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "bogus",
+        "",
+        SIGNER.compute_signature(STREAM_WSS + "/", {}),  # any other URL form doesn't count
+        SIGNER.compute_signature(BASE + "/twilio/stream", {}),
+        RequestValidator("someone-elses-token").compute_signature(STREAM_WSS, {}),
+    ],
+)
+def test_stream_with_a_bad_signature_is_refused_before_the_token_is_used(signature):
     registry = FakeRegistry()
     with pytest.raises(WebSocketDisconnect):
-        run_stream(client_for(registry, enforce=True), "bogus")
+        run_stream(client_for(registry), signature)
     assert registry.started == []
-
-
-def test_bad_stream_signature_is_only_logged_when_not_enforced(caplog):
-    registry = FakeRegistry()
-    run_stream(client_for(registry), "bogus")
-    assert [token for token, _ in registry.started] == ["tok123"]
-    assert "didn't match" in caplog.text
