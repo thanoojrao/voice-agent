@@ -35,9 +35,10 @@ from datetime import UTC, datetime, timedelta
 
 from voice_agent.core.bargein import Heard, classify
 from voice_agent.core.clips import Clip, Clips
-from voice_agent.core.greeting import GreetingTemplates, build_opening
+from voice_agent.core.greeting import GreetingTemplates, build_opening, usable_name
 from voice_agent.core.history import History
 from voice_agent.core.interfaces import (
+    CallNotes,
     Capability,
     ChannelAdapter,
     Done,
@@ -471,7 +472,10 @@ class Session:
         if not hung_up and Capability.END_SESSION in adapter.capabilities:
             await _quietly(adapter.end_session())
         if self._session_id:
-            summary = await self._summarize()
+            notes = await self._summarize()
+            summary = notes.summary if notes else None
+            if notes:
+                await self._fill_caller_details(notes)  # before the email, so it has the name
             await _quietly(self._deps.storage.end_session(self._session_id, reason, summary))
             await self._send_message(reason, summary)
         log.info("session %s ended: %s", self._session_id, reason)
@@ -504,7 +508,7 @@ class Session:
         await self._settle(await turn.interrupt(clear_audio=clear_audio))
         self._end_reason = reason
 
-    async def _summarize(self) -> str | None:
+    async def _summarize(self) -> CallNotes | None:
         if not any(line.startswith("Caller:") for line in self._transcript):
             return None
         try:
@@ -512,6 +516,32 @@ class Session:
         except Exception:
             log.exception("summary failed (session %s)", self._session_id)
             return None
+
+    async def _fill_caller_details(self, notes: CallNotes) -> None:
+        """A safety net for save_caller_details: the model sometimes greets a caller by name
+        without saving it. Only fills what the caller record doesn't have yet. A name that
+        was saved, or corrected, during the call came from the caller directly, so it isn't
+        overwritten by a reading of the transcript."""
+        ctx = self._tool_ctx
+        if ctx is None:
+            return
+        caller = ctx.caller
+        name = None if caller.name else usable_name(notes.name)
+        company = None if caller.company else notes.company
+        reason = None if caller.reason else notes.reason
+        if not (name or company or reason):
+            return
+        try:
+            await self._deps.storage.set_caller_details(caller.id, name, company, reason)
+        except Exception:
+            log.exception("couldn't save caller details from the summary (caller %s)", caller.id)
+            return
+        ctx.caller = replace(
+            caller,
+            name=name or caller.name,
+            company=company or caller.company,
+            reason=reason or caller.reason,
+        )
 
     # -- helpers --------------------------------------------------------------------------------
 
@@ -541,7 +571,7 @@ class _Scripted:
         yield TextDelta(self._line)
         yield Done("end_turn")
 
-    async def summarize(self, transcript: str) -> str:
+    async def summarize(self, transcript: str) -> CallNotes:
         raise NotImplementedError
 
     async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:

@@ -15,6 +15,7 @@ import httpx2
 import pytest
 
 from voice_agent.core.interfaces import (
+    CallNotes,
     Done,
     LlmEvent,
     Message,
@@ -374,27 +375,49 @@ def summary_response(text: str, stop_reason: str = "end_turn") -> httpx2.Respons
     return httpx2.Response(200, json=message)
 
 
-async def test_summary_is_one_short_request_over_the_transcript():
-    api = Api(summary_response(" The caller asked for a call back. "))
-    transcript = "Caller: It's Sam from Acme.\nAgent: Nice to meet you, Sam."
-    assert await api.llm.summarize(transcript) == "The caller asked for a call back."
+def notes_json(summary="The caller asked for a call back.", name="", company="", reason=""):
+    return json.dumps({"summary": summary, "name": name, "company": company, "reason": reason})
+
+
+async def test_summary_is_one_short_structured_request_over_the_transcript():
+    api = Api(summary_response(notes_json(" The caller asked for a call back. ", name=" Sam ")))
+    transcript = "Caller: Sam.\nAgent: Nice to meet you, Sam."
+    notes = await api.llm.summarize(transcript)
+    assert notes == CallNotes("The caller asked for a call back.", name="Sam")
 
     body = api.body
     assert "stream" not in body
     assert body["thinking"] == {"type": "disabled"}
-    assert body["max_tokens"] <= 200
+    assert body["max_tokens"] <= 300
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert body["output_config"]["effort"] == "low"
     [message] = body["messages"]
     assert message["content"] == f"<transcript>\n{transcript}\n</transcript>"
     assert "tools" not in body
 
 
-async def test_summary_refusal_and_errors_raise():
-    api = Api(
+async def test_summary_details_the_caller_didnt_give_are_none():
+    api = Api(summary_response(notes_json(company="  ")))
+    notes = await api.llm.summarize("Caller: hi")
+    assert (notes.name, notes.company, notes.reason) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
         summary_response("", stop_reason="refusal"),
-        httpx2.Response(529, json=error_body("overloaded_error")),
-    )
-    with pytest.raises(ProviderError):
-        await api.llm.summarize("Caller: hi")
+        summary_response('{"summary": "cut sh', stop_reason="max_tokens"),
+        summary_response('{"summary": "no other fields"}'),
+    ],
+)
+async def test_summary_refused_cut_short_or_malformed_raises(response):
+    with pytest.raises(ProviderError) as caught:
+        await Api(response).llm.summarize("Caller: hi")
+    assert not caught.value.retryable
+
+
+async def test_summary_api_error_raises_retryable():
+    api = Api(httpx2.Response(529, json=error_body("overloaded_error")))
     with pytest.raises(ProviderError) as caught:
         await api.llm.summarize("Caller: hi")
     assert caught.value.retryable

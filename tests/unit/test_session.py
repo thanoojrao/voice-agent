@@ -11,6 +11,7 @@ from tests.fakes import FakeLLM, FakeNotifier, FakeSTT, FakeTTS, FakeVoiceAdapte
 from voice_agent.core.clips import Clip, Clips
 from voice_agent.core.greeting import GreetingTemplates
 from voice_agent.core.interfaces import (
+    CallNotes,
     Capability,
     Done,
     ProviderError,
@@ -223,6 +224,49 @@ async def test_a_conversation_is_stored_and_summarized(store):
     assert [seq for seq, *_ in turns] == [1, 2, 3, 4, 5, 6]
     assert await call.session_row() == ("goodbye", "Fake summary.")
     assert "Caller: What do you do?" in call.llm.summarized[0]
+
+
+async def test_details_the_model_forgot_to_save_are_filled_in_from_the_summary(store):
+    # The model said "Nice to meet you, Sam" but never called save_caller_details.
+    call = Call(store, [reply("Nice to meet you, Sam.")])
+    call.llm.notes = CallNotes("The caller said hello.", name="Sam", company="Acme")
+    await call.connect()
+    call.say("Sam.")
+    await call.played(2)
+    await call.adapter.hang_up()
+    await call.ended()
+
+    caller = await store.get_or_create_caller("twilio", NUMBER)
+    assert (caller.name, caller.company, caller.reason) == ("Sam", "Acme", None)
+    assert await call.session_row() == ("caller_hangup", "The caller said hello.")
+
+
+async def test_the_summary_never_overwrites_details_saved_during_the_call(store):
+    caller = await store.get_or_create_caller("twilio", NUMBER)
+    await store.set_caller_details(caller.id, "Priya", None, None)
+    call = Call(store, [reply("Thanks, Priya.")])
+    call.llm.notes = CallNotes("x", name="Sam", reason="a backend role")
+    await call.connect()
+    call.say("I'm calling about a backend role.")
+    await call.played(2)
+    await call.adapter.hang_up()
+    await call.ended()
+
+    caller = await store.get_or_create_caller("twilio", NUMBER)
+    assert (caller.name, caller.reason) == ("Priya", "a backend role")
+
+
+async def test_a_summary_name_that_isnt_a_name_is_ignored(store):
+    call = Call(store, [reply("Sorry, could you repeat that?")])
+    call.llm.notes = CallNotes("x", name="um it's sam from acme corp, the recruiting team")
+    await call.connect()
+    call.say("Um it's Sam from Acme Corp, the recruiting team.")
+    await call.played(2)
+    await call.adapter.hang_up()
+    await call.ended()
+
+    caller = await store.get_or_create_caller("twilio", NUMBER)
+    assert caller.name is None
 
 
 async def test_call_with_no_caller_words_is_not_summarized(store):

@@ -177,12 +177,24 @@ class ProviderError(Exception):
         self.retryable = retryable
 
 
+@dataclass(frozen=True, slots=True)
+class CallNotes:
+    """What the end-of-call summary call reads from the transcript. The caller's details
+    are None when they didn't say; the session only uses them to fill in what wasn't saved
+    during the call, so the model forgetting save_caller_details doesn't lose them."""
+
+    summary: str
+    name: str | None = None
+    company: str | None = None
+    reason: str | None = None
+
+
 class LanguageModel(Protocol):
     def stream_reply(
         self, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]
     ) -> AsyncIterator[LlmEvent]: ...
 
-    async def summarize(self, transcript: str) -> str: ...
+    async def summarize(self, transcript: str) -> CallNotes: ...
 
     async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:
         """Get the shared part of the prompt ready (e.g. cached) before the first reply,

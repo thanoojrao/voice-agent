@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from voice_agent.core.interfaces import (
     Caller,
+    CallNotes,
     Capability,
     LlmEvent,
     Message,
@@ -180,6 +181,7 @@ class LlmCall:
 class FakeLLM:
     replies: list[Reply] = field(default_factory=list)
     summary: str = "Fake summary."
+    notes: CallNotes | None = None  # returned by summarize() instead of CallNotes(summary)
     calls: list[LlmCall] = field(default_factory=list)
     summarized: list[str] = field(default_factory=list)
     prewarmed: list[LlmCall] = field(default_factory=list)
@@ -199,9 +201,9 @@ class FakeLLM:
         if reply.raises:
             raise reply.raises
 
-    async def summarize(self, transcript: str) -> str:
+    async def summarize(self, transcript: str) -> CallNotes:
         self.summarized.append(transcript)
-        return self.summary
+        return self.notes or CallNotes(self.summary)
 
     async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None:
         self.prewarmed.append(LlmCall(list(system), [], list(tools)))

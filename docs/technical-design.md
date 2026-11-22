@@ -171,7 +171,7 @@ class LanguageModel(Protocol):
     def stream_reply(
         self, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]
     ) -> AsyncIterator[LlmEvent]: ...  # TextDelta, ToolCall, Done, Refused
-    async def summarize(self, transcript: str) -> str: ...
+    async def summarize(self, transcript: str) -> CallNotes: ...  # summary + caller's name, company, reason
     async def prewarm(self, system: list[SystemBlock], tools: list[ToolDef]) -> None: ...
 
 
@@ -260,7 +260,7 @@ sequenceDiagram
 1. Stop any turn still running and store what the caller heard. Don't send `clear` if the caller hung up.
 2. Close STT.
 3. Hang up through `adapter.end_session()`, unless the caller already did.
-4. `summarize` the transcript (Haiku, non-streaming), only if the caller said something, then `storage.end_session(reason, summary)`. This runs in the session's own task, so it never delays another call.
+4. `summarize` the transcript (Haiku, non-streaming, structured output), only if the caller said something. It returns the summary and the caller's name, company and reason as they said them. Those fill only fields the caller record doesn't have yet (a safety net for when the model forgot `save_caller_details`; details saved during the call are never overwritten). Then `storage.end_session(reason, summary)`. This runs in the session's own task, so it never delays another call.
 5. If a message was left, email it: `notifier.message_left(...)` with its final version, the caller's latest name and the ended session (summary included), then `mark_message_notified`. One email per call, sent after the caller has gone, so it never slows the call. If the email fails, the message stays saved and unsent (`notified_at` empty).
 
 On shutdown, the registry stops admitting, sends every live session `on_session_end("shutdown")` so it ends the normal way, and cancels any still running after 10 s.
