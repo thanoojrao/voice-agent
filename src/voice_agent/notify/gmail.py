@@ -9,17 +9,23 @@ saved and marked unsent, and it's sent again at the next startup.
 The app password is only read when signing in. smtplib's errors carry the server's reply,
 never the password, so they're safe to log.
 
-The email is plain text: it's read on a phone, and there's nothing to format.
+Message emails are plain text plus an HTML version: the message in a box, the details in a
+table, and the caller's number and email as tap-to-call and tap-to-email links. Alerts are
+plain text.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import smtplib
 import ssl
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import tzinfo
 from email.message import EmailMessage
+from email.utils import formataddr
 from typing import Any
 
 from pydantic import SecretStr
@@ -30,49 +36,117 @@ from voice_agent.core.tools import DECLINED
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465  # TLS from the start (587 would be STARTTLS)
 SMTP_TIMEOUT_S = 30.0
+SENDER_NAME = "Voice agent"  # shown as the sender in the inbox
+SUBJECT_PREFIX = "Voice agent: "  # makes a Gmail filter easy; alerts already start with it
+
+_EMAIL_ADDRESS = re.compile(r"[\w.%+-]+@[\w-]+(\.[\w-]+)+")
+_PHONE = re.compile(r"\+?[\d\s().-]{7,20}")
 
 
-def message_email(
-    msg: MessageRow, caller: Caller, session: SessionRow, tz: tzinfo
-) -> tuple[str, str]:
-    """The subject and body of the email for a message a caller left."""
+@dataclass(frozen=True, slots=True)
+class Email:
+    subject: str
+    text: str
+    html: str | None = None  # sent alongside the text, for mail apps that show it
+
+
+@dataclass(frozen=True, slots=True)
+class _Detail:
+    label: str
+    value: str
+    link: str | None = None  # tel: or mailto:, so it's one tap on a phone
+
+
+def message_email(msg: MessageRow, caller: Caller, session: SessionRow, tz: tzinfo) -> Email:
+    """The email for a message a caller left: plain text, plus an HTML version.
+
+    Everything here except the labels came from the caller (through speech recognition
+    and the model), so the HTML escapes all of it, and only builds links from values
+    that are plainly an email address or a phone number."""
     name = msg.name or caller.name
     number = caller.address
     who = name or number or "an anonymous caller"
-    subject = " ".join(f"Message from {who}".split())  # no line breaks in a header
+    subject = _one_line(f"{SUBJECT_PREFIX}message from {who}")
 
-    from_line = name or "Name not given"
-    from_line += f" ({number})" if number else " (number withheld)"
-    lines = [
-        msg.body,
-        "",
-        f"From: {from_line}",
-        f"How to reach them: {_how_to_reach(msg.contact, number)}",
+    reach, reach_link = _how_to_reach(msg.contact, number)
+    details = [
+        _Detail("From", name or "Name not given"),
+        _Detail("Phone", number, _link(number)) if number else _Detail("Phone", "withheld"),
+        _Detail("Reach them", reach, reach_link),
     ]
     if caller.company:
-        lines.append(f"Company: {caller.company}")
+        details.append(_Detail("Company", caller.company))
     if caller.reason:
-        lines.append(f"Calling about: {caller.reason}")
-    lines.append(f"Called: {_when(session, tz)}")
+        details.append(_Detail("Calling about", caller.reason))
+    details.append(_Detail("Called", _when(session, tz)))
+    ended = session.end_reason or "unknown"
+    footer = f"Call #{session.id}, ended: {ended}. Sent by {SENDER_NAME}."
+
+    heading = f"New message from {who}"
+    lines = [heading, "-" * len(heading), f'"{msg.body}"', ""]
+    lines += [f"{d.label + ':':<15}{d.value}" for d in details]
     if session.summary:
         lines += ["", f"Call summary: {session.summary}"]
-    lines += ["", f"(Call #{session.id}, ended: {session.end_reason or 'unknown'})"]
-    return subject, "\n".join(lines) + "\n"
+    lines += ["", footer]
+    text = "\n".join(lines) + "\n"
+    return Email(subject, text, _html(heading, msg.body, details, session.summary, footer))
 
 
-def _how_to_reach(contact: str | None, number: str | None) -> str:
+def _html(heading: str, body: str, details: list[_Detail], summary: str | None, footer: str) -> str:
+    e = html.escape
+    rows = "".join(
+        f'<tr><td style="padding:4px 16px 4px 0;color:#666;white-space:nowrap;'
+        f'vertical-align:top">{e(d.label)}</td><td style="padding:4px 0">'
+        + (f'<a href="{e(d.link)}">{e(d.value)}</a>' if d.link else e(d.value))
+        + "</td></tr>"
+        for d in details
+    )
+    summary_html = (
+        f'<p style="margin:16px 0 0;color:#444"><b>Call summary:</b> {e(summary)}</p>'
+        if summary
+        else ""
+    )
+    return (
+        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#222;'
+        'max-width:560px">'
+        f'<h2 style="font-size:18px;margin:0 0 12px">{e(heading)}</h2>'
+        '<div style="background:#f3f6fb;border-left:4px solid #3b6fd8;padding:12px 14px;'
+        f'margin:0 0 16px;white-space:pre-wrap">{e(body)}</div>'
+        f'<table style="border-collapse:collapse">{rows}</table>'
+        f"{summary_html}"
+        f'<p style="margin:20px 0 0;font-size:12px;color:#888">{e(footer)}</p>'
+        "</div>"
+    )
+
+
+def _how_to_reach(contact: str | None, number: str | None) -> tuple[str, str | None]:
     if contact == DECLINED:
-        return "they didn't want to say"
+        return "they didn't want to say", None
     if contact:
-        return contact
+        return contact, _link(contact)
     if number:
-        return f"call back on {number}"
-    return "not given"
+        return f"call back on {number}", _link(number)
+    return "not given", None
+
+
+def _link(value: str) -> str | None:
+    """A mailto: or tel: link, only for a value that is clearly one or the other."""
+    value = value.strip()
+    if _EMAIL_ADDRESS.fullmatch(value):
+        return f"mailto:{value}"
+    if _PHONE.fullmatch(value):
+        return "tel:" + "".join(c for c in value if c.isdigit() or c == "+")
+    return None
 
 
 def _when(session: SessionRow, tz: tzinfo) -> str:
     started = session.started_at.astimezone(tz)
     return started.strftime("%a %d %b %Y, %I:%M %p %Z").replace(" 0", " ")
+
+
+def _one_line(text: str) -> str:
+    """Headers can't contain line breaks: one would start a new header (say, a Bcc)."""
+    return " ".join(text.split())
 
 
 class GmailNotifier:
@@ -92,18 +166,19 @@ class GmailNotifier:
         self._smtp = smtp
 
     async def message_left(self, msg: MessageRow, caller: Caller, session: SessionRow) -> None:
-        subject, body = message_email(msg, caller, session, self._tz)
-        await self._send(subject, body)
+        await self._send(message_email(msg, caller, session, self._tz))
 
     async def alert(self, subject: str, body: str) -> None:
-        await self._send(" ".join(subject.split()), body)
+        await self._send(Email(_one_line(subject), body))
 
-    async def _send(self, subject: str, body: str) -> None:
+    async def _send(self, mail: Email) -> None:
         email = EmailMessage()
-        email["From"] = self._address
+        email["From"] = formataddr((SENDER_NAME, self._address))
         email["To"] = self._to
-        email["Subject"] = subject
-        email.set_content(body)
+        email["Subject"] = mail.subject
+        email.set_content(mail.text)
+        if mail.html:
+            email.add_alternative(mail.html, subtype="html")
         await asyncio.to_thread(self._send_now, email)
 
     def _send_now(self, email: EmailMessage) -> None:

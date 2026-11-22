@@ -82,51 +82,84 @@ def notifier(**smtp_kwargs) -> GmailNotifier:
 
 
 def test_message_email_has_everything_the_owner_needs_to_follow_up():
-    subject, body = message_email(
+    email = message_email(
         message(contact="sam@example.com", name="Sam"),
         caller(name="Sam", company="Acme", reason="a backend role"),
         session(),
         TZ,
     )
-    assert subject == "Message from Sam"
-    assert body.startswith("Would like to chat about the backend role.\n")
-    assert f"From: Sam ({NUMBER})" in body
-    assert "How to reach them: sam@example.com" in body
-    assert "Company: Acme" in body
-    assert "Calling about: a backend role" in body
-    assert "Called: Fri 20 Nov 2026, 2:05 PM EST" in body
-    assert "Call summary: The caller asked about the backend role." in body
-    assert "(Call #7, ended: goodbye)" in body
+    assert email.subject == "Voice agent: message from Sam"
+    text = email.text
+    assert text.startswith("New message from Sam\n")
+    assert '"Would like to chat about the backend role."' in text
+    for line in (
+        "From:          Sam",
+        f"Phone:         {NUMBER}",
+        "Reach them:    sam@example.com",
+        "Company:       Acme",
+        "Calling about: a backend role",
+        "Called:        Fri 20 Nov 2026, 2:05 PM EST",
+        "Call summary: The caller asked about the backend role.",
+        "Call #7, ended: goodbye. Sent by Voice agent.",
+    ):
+        assert line in text
+
+
+def test_html_has_tap_to_call_and_tap_to_email_links():
+    email = message_email(message(contact="sam@example.com"), caller(name="Sam"), session(), TZ)
+    assert email.html is not None
+    assert f'<a href="tel:{NUMBER}">{NUMBER}</a>' in email.html
+    assert '<a href="mailto:sam@example.com">sam@example.com</a>' in email.html
+    assert "Would like to chat about the backend role." in email.html
+
+
+def test_html_escapes_everything_the_caller_said():
+    # A caller (or speech recognition) can put anything in a message or a name.
+    sneaky = '<a href="https://evil.example">click</a><script>x()</script>'
+    email = message_email(
+        message(body=sneaky, contact='"><img src=x>'),
+        caller(name="Sam", company="<b>Acme</b>"),
+        session(summary="<i>hi</i>"),
+        TZ,
+    )
+    assert email.html is not None
+    for raw in ("<script>", '<a href="https://evil', "<img", "<b>Acme", "<i>hi"):
+        assert raw not in email.html
+    assert "&lt;script&gt;" in email.html
+    assert 'href="mailto:' not in email.html  # the odd contact isn't an address: no link
 
 
 @pytest.mark.parametrize(
-    ("contact", "address", "reach"),
+    ("contact", "address", "reach", "link"),
     [
-        (None, NUMBER, f"call back on {NUMBER}"),  # "this number"
-        (DECLINED, NUMBER, "they didn't want to say"),
-        ("+15550199", NUMBER, "+15550199"),
-        (None, None, "not given"),
+        (None, NUMBER, f"call back on {NUMBER}", f"tel:{NUMBER}"),  # "this number"
+        (DECLINED, NUMBER, "they didn't want to say", None),
+        ("+1 (555) 019-9", NUMBER, "+1 (555) 019-9", "tel:+15550199"),
+        (None, None, "not given", None),
     ],
 )
-def test_how_to_reach_them(contact, address, reach):
-    _, body = message_email(message(contact=contact), caller(address=address), session(), TZ)
-    assert f"How to reach them: {reach}" in body
+def test_how_to_reach_them(contact, address, reach, link):
+    email = message_email(message(contact=contact), caller(address=address), session(), TZ)
+    assert f"Reach them:    {reach}" in email.text
+    assert email.html is not None
+    if link:
+        assert f'<a href="{link}">' in email.html
 
 
 def test_without_a_name_the_number_or_anonymous_is_used():
-    subject, body = message_email(message(), caller(), session(summary=None), TZ)
-    assert subject == f"Message from {NUMBER}"
-    assert "From: Name not given" in body
-    assert "Company:" not in body and "Call summary:" not in body
+    email = message_email(message(), caller(), session(summary=None), TZ)
+    assert email.subject == f"Voice agent: message from {NUMBER}"
+    assert "From:          Name not given" in email.text
+    assert "Company:" not in email.text and "Call summary:" not in email.text
 
-    subject, body = message_email(message(), caller(address=None), session(), TZ)
-    assert subject == "Message from an anonymous caller"
-    assert "(number withheld)" in body
+    email = message_email(message(), caller(address=None), session(), TZ)
+    assert email.subject == "Voice agent: message from an anonymous caller"
+    assert "Phone:         withheld" in email.text
 
 
 def test_the_name_on_the_message_wins_over_the_callers():
-    subject, _ = message_email(message(name="Priya"), caller(name="Sam"), session(), TZ)
-    assert subject == "Message from Priya"
+    email = message_email(message(name="Priya"), caller(name="Sam"), session(), TZ)
+    assert email.subject == "Voice agent: message from Priya"
 
 
 # -- sending ------------------------------------------------------------------------------------
@@ -140,9 +173,13 @@ async def test_sends_over_tls_signed_in_with_the_app_password():
     assert smtp.context is not None
     assert smtp.logins == [("bot@example.com", "abcdefghijklmnop")]  # spaces removed
     [email] = smtp.sent
-    assert (email["From"], email["To"]) == ("bot@example.com", "owner@example.com")
-    assert email["Subject"] == "Message from Sam"
-    assert "backend role" in email.get_content()
+    assert (email["From"], email["To"]) == ("Voice agent <bot@example.com>", "owner@example.com")
+    assert email["Subject"] == "Voice agent: message from Sam"
+    text_part = email.get_body(preferencelist=("plain",))
+    html_part = email.get_body(preferencelist=("html",))
+    assert text_part is not None and html_part is not None  # both, for any mail app
+    assert "backend role" in text_part.get_content()
+    assert "backend role" in html_part.get_content()
     assert smtp.closed
 
 
