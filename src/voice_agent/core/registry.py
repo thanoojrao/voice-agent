@@ -66,6 +66,9 @@ class Limits:
     daily_cap: int
     per_caller_daily: int
     blocked: frozenset[str] = frozenset()  # E.164 numbers
+    # E.164 numbers that skip the per-caller cap: the owner testing. They still count
+    # toward the calls-at-once limit and the daily cap, so testing can't crowd out callers.
+    exempt: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +127,7 @@ class Registry:
             if today + len(pending) >= self._limits.daily_cap:
                 return Refusal.DAILY_CAP
 
-            if address is not None:
+            if address is not None and address not in self._limits.exempt:
                 caller = await self._storage.get_or_create_caller(channel, address)
                 theirs = await self._storage.count_sessions_since(since, caller.id)
                 theirs += sum(1 for s in pending if (s.channel, s.address) == (channel, address))

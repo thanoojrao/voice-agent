@@ -49,6 +49,24 @@ def test_blocked_numbers_must_be_e164():
         AgentConfig.model_validate(base(blocked_numbers=["555-1234"]))
 
 
+def test_owner_numbers_from_env(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # no .env here
+    monkeypatch.setenv("OWNER_NUMBERS", " +15550100, +447700900123 ,")
+    assert Settings().owner_number_set() == {"+15550100", "+447700900123"}
+    monkeypatch.delenv("OWNER_NUMBERS")
+    assert Settings().owner_number_set() == frozenset()
+
+
+@pytest.mark.parametrize("bad", ["7770123", "+1 777 0123", "+17770123;+1777"])
+def test_owner_numbers_must_be_e164_and_arent_echoed(monkeypatch, tmp_path, bad):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OWNER_NUMBERS", bad)
+    with pytest.raises(ValidationError) as caught:
+        Settings()
+    assert "E.164" in str(caught.value)
+    assert "777" not in str(caught.value)  # it's a personal number; errors get logged
+
+
 def test_missing_config_file(tmp_path):
     with pytest.raises(RuntimeError):
         load_agent_config(tmp_path / "nope.yaml")

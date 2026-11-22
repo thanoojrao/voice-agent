@@ -244,7 +244,7 @@ sequenceDiagram
 **Admission (`registry.admit`, from the webhook)**
 1. A number on `blocked_numbers` → `BLOCKED` (the adapter rejects without answering).
 2. Concurrency: live sessions *plus admitted calls whose stream hasn't opened yet* must stay under `max_concurrent_sessions`. Counting the waiting ones stops two calls ringing at once from both taking the last place. Check-and-reserve runs under a lock.
-3. `daily_session_cap` and `per_caller_sessions_per_day`, counted over a **rolling 24 hours** (no timezone to get wrong, no burst at midnight), waiting slots included. Withheld numbers can't be told apart, so only the shared caps apply to them.
+3. `daily_session_cap` and `per_caller_sessions_per_day`, counted over a **rolling 24 hours** (no timezone to get wrong, no burst at midnight), waiting slots included. Withheld numbers can't be told apart, so only the shared caps apply to them. The owner's own numbers (`OWNER_NUMBERS` in `.env`, kept out of the repo) skip the per-caller cap so testing never locks them out, but still count toward concurrency and the daily cap.
 4. Pass → a `Slot`. Its random `token` is the one-time stream token (§7.1): single use, void after 60 s, and it must match the channel and number that were admitted. Any refusal other than `BLOCKED` → the busy clip.
 
 **Start (`registry.start_session`, when the stream opens)** consumes the slot, creates the `Session` through a factory that `app/main.py` passes in, and runs it as a task. An unknown, used, expired or mismatched token raises `AdmissionError`, and the adapter closes the socket.

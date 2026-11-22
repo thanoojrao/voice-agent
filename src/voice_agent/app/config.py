@@ -7,16 +7,26 @@ Two sources:
 Both are validated at startup; a bad config refuses to start (no hot reload in v0).
 """
 
+import re
 from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from voice_agent.core.greeting import GreetingTemplates
 
 E164 = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{6,14}$")]
+_E164 = re.compile(r"\+[1-9]\d{6,14}")
 OneWord = Annotated[str, StringConstraints(pattern=r"^\S+$")]
 
 
@@ -24,7 +34,10 @@ class Settings(BaseSettings):
     """Secrets and deploy values. Every field may be blank until the piece that uses it is
     wired up; call `require()` from that piece so a missing key fails loudly at startup."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # hide_input_in_errors: a bad value is a secret or a personal number, and errors get logged.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
     anthropic_api_key: SecretStr | None = None
     deepgram_api_key: SecretStr | None = None
@@ -35,7 +48,21 @@ class Settings(BaseSettings):
     gmail_app_password: SecretStr | None = None
     admin_password: SecretStr | None = None
     public_base_url: str | None = None
+    # The owner's own numbers, comma-separated, to skip the per-caller cap when testing.
+    # Here rather than agent.config.yaml so the number stays out of the public repo.
+    owner_numbers: str = ""
     config_path: Path = Path("agent.config.yaml")
+
+    @field_validator("owner_numbers")
+    @classmethod
+    def _owner_numbers_are_e164(cls, value: str) -> str:
+        for number in _split(value):
+            if not _E164.fullmatch(number):
+                raise ValueError("each number must be in +E.164 form, like +15550100")
+        return value
+
+    def owner_number_set(self) -> frozenset[str]:
+        return frozenset(_split(self.owner_numbers))
 
     def require(self, *names: str) -> None:
         missing = [n.upper() for n in names if not getattr(self, n)]
@@ -106,3 +133,7 @@ def load_agent_config(path: Path) -> AgentConfig:
         raise RuntimeError(f"Config file not found: {path}")
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return AgentConfig.model_validate(data)
+
+
+def _split(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]

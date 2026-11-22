@@ -167,6 +167,18 @@ async def test_per_caller_cap_counts_stored_sessions_and_waiting_slots(store):
     assert isinstance(await rig.registry.admit("twilio", ALEX), Slot)
 
 
+async def test_the_owners_number_skips_the_per_caller_cap_but_not_the_shared_ones(store):
+    rig = Rig(
+        store, Limits(max_concurrent=5, daily_cap=4, per_caller_daily=1, exempt=frozenset({ALEX}))
+    )
+    await rig.past_sessions(ALEX, 2)
+    assert isinstance(await rig.registry.admit("twilio", ALEX), Slot)  # 3rd today: fine
+    assert isinstance(await rig.registry.admit("twilio", SAM), Slot)  # 4th overall
+    assert await rig.registry.admit("twilio", ALEX) is Refusal.DAILY_CAP  # shared cap still holds
+    await rig.past_sessions(SAM, 1)
+    assert await rig.registry.admit("twilio", SAM) is Refusal.DAILY_CAP
+
+
 async def test_withheld_numbers_only_meet_the_shared_caps(store):
     rig = Rig(store, Limits(max_concurrent=5, daily_cap=50, per_caller_daily=1))
     await rig.admit(None)

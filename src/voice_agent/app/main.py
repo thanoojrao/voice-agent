@@ -119,6 +119,7 @@ def create_app() -> FastAPI:
         daily_cap=config.daily_session_cap,
         per_caller_daily=config.per_caller_sessions_per_day,
         blocked=frozenset(config.blocked_numbers),
+        exempt=settings.owner_number_set(),
     )
     handle = _RegistryHandle()
     gmail = gmail_notifier(settings)
