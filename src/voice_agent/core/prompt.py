@@ -259,7 +259,10 @@ def call_context(call: CallContext, status_updated: date | None, status_stale_da
 
     if call.last_summary:
         when = f" on {_spoken_date(call.last_call_date)}" if call.last_call_date else ""
-        lines.append(f"Summary of our last call{when}: {call.last_summary}")
+        lines.append(
+            f"Summary of our last call{when}, for context only (anything from it, like a "
+            f"message, was already dealt with): {call.last_summary}"
+        )
 
     if status_updated and (call.today - status_updated).days > status_stale_days:
         lines.append(

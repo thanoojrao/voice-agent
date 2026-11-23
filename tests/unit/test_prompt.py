@@ -178,7 +178,10 @@ def test_last_summary():
         None,
         14,
     )
-    assert "Summary of our last call on November 1, 2026: Asked about the voice agent." in text
+    assert (
+        "Summary of our last call on November 1, 2026, for context only (anything from it, "
+        "like a message, was already dealt with): Asked about the voice agent." in text
+    )
 
 
 def test_stale_status_note():
