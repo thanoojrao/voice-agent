@@ -226,6 +226,73 @@ async def test_unsent_messages_come_with_their_caller_and_session_oldest_first(s
     )
 
 
+# -- admin page reads ------------------------------------------------------
+
+
+async def test_recent_sessions_newest_first_with_caller_turns_and_message(store):
+    ann, first = await new_session(store)
+    await store.add_turn(first, TurnRow(1, "caller", "hi", T0))
+    await store.add_turn(first, TurnRow(2, "agent", "hello", T0, latency_ms=700))
+    await store.add_turn(first, TurnRow(3, "caller", "bye", T0))
+    await store.save_message(first, MessageRow("call me", T0))
+    bo, second = await new_session(store, number="+15550199", ref="CA2")
+
+    listing = await store.recent_sessions()
+    assert [(r.session.id, r.caller.id, r.caller_turns, r.has_message) for r in listing] == [
+        (second, bo.id, 0, False),
+        (first, ann.id, 2, True),
+    ]
+    assert [r.session.id for r in await store.recent_sessions(limit=1)] == [second]
+
+
+async def test_recent_sessions_empty(store):
+    assert await store.recent_sessions() == []
+
+
+async def test_get_session_with_its_caller_and_turns_in_order(store):
+    ann, sid = await new_session(store)
+    await store.add_turn(sid, TurnRow(2, "agent", "hello", T0, T0, True, 640))
+    await store.add_turn(sid, TurnRow(1, "caller", "hi", T0))
+
+    found = await store.get_session(sid)
+    assert found is not None
+    session, caller = found
+    assert (session.id, caller.id) == (sid, ann.id)
+    assert await store.session_turns(sid) == [
+        TurnRow(1, "caller", "hi", T0),
+        TurnRow(2, "agent", "hello", T0, T0, interrupted=True, latency_ms=640),
+    ]
+
+
+async def test_get_missing_session(store):
+    assert await store.get_session(999) is None
+    assert await store.session_turns(999) == []
+
+
+async def test_recent_messages_newest_first_with_caller_and_session(store):
+    ann, first = await new_session(store)
+    await store.save_message(first, MessageRow("first", T0, "Ann"))
+    bo, second = await new_session(store, number="+15550199", ref="CA2")
+    await store.save_message(second, MessageRow("second", T0))
+    await new_session(store, ref="CA3")  # no message
+
+    found = await store.recent_messages()
+    assert [(m.body, c.id, s.id) for m, c, s in found] == [
+        ("second", bo.id, second),
+        ("first", ann.id, first),
+    ]
+
+
+async def test_recent_callers_most_recent_first(store, clock):
+    ann, _ = await new_session(store)
+    clock.advance(minutes=5)
+    bo, _ = await new_session(store, number="+15550199", ref="CA2")
+    clock.advance(minutes=5)
+    await new_session(store, ref="CA3")  # Ann again
+
+    assert [c.id for c in await store.recent_callers()] == [ann.id, bo.id]
+
+
 # -- persistence -----------------------------------------------------------
 
 

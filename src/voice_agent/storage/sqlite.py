@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +19,16 @@ import aiosqlite
 
 from voice_agent.core.interfaces import Caller, MessageRow, SessionRow, SessionStart, TurnRow
 from voice_agent.storage.migrate import apply_migrations
+
+
+@dataclass(frozen=True, slots=True)
+class SessionListing:
+    """One row of the admin page's call list."""
+
+    session: SessionRow
+    caller: Caller
+    caller_turns: int  # how many times the caller spoke
+    has_message: bool
 
 
 def utc_now() -> datetime:
@@ -241,3 +252,82 @@ class SqliteStorage:
             cur = await self._db.execute("SELECT * FROM callers WHERE id = ?", (session.caller_id,))
             found.append((_message(r), _caller(await _one(cur)), session))
         return found
+
+    # -- admin page reads (design doc §13) ------------------------------------
+
+    async def recent_sessions(self, limit: int = 100) -> list[SessionListing]:
+        """The newest calls first, each with its caller, how many times the caller spoke,
+        and whether they left a message."""
+        cur = await self._db.execute(
+            "SELECT s.*, "
+            "(SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.speaker = 'caller') "
+            "AS caller_turns, "
+            "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id) AS has_message "
+            "FROM sessions s ORDER BY s.id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = list(await cur.fetchall())
+        callers = await self._by_id("callers", {r["caller_id"] for r in rows}, _caller)
+        return [
+            SessionListing(
+                _session(r), callers[r["caller_id"]], r["caller_turns"], bool(r["has_message"])
+            )
+            for r in rows
+        ]
+
+    async def get_session(self, session_id: int) -> tuple[SessionRow, Caller] | None:
+        cur = await self._db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        r = await cur.fetchone()
+        if r is None:
+            return None
+        session = _session(r)
+        cur = await self._db.execute("SELECT * FROM callers WHERE id = ?", (session.caller_id,))
+        return session, _caller(await _one(cur))
+
+    async def session_turns(self, session_id: int) -> list[TurnRow]:
+        cur = await self._db.execute(
+            "SELECT * FROM turns WHERE session_id = ? ORDER BY seq", (session_id,)
+        )
+        return [
+            TurnRow(
+                seq=r["seq"],
+                speaker=r["speaker"],
+                text=r["text"],
+                started_at=_dt(r["started_at"]),
+                ended_at=_dt_opt(r["ended_at"]),
+                interrupted=bool(r["interrupted"]),
+                latency_ms=r["latency_ms"],
+            )  # fmt: skip
+            for r in await cur.fetchall()
+        ]
+
+    async def recent_messages(
+        self, limit: int = 100
+    ) -> list[tuple[MessageRow, Caller, SessionRow]]:
+        """The newest messages first, each with its caller and session."""
+        cur = await self._db.execute("SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,))
+        rows = list(await cur.fetchall())
+        sessions = await self._by_id("sessions", {r["session_id"] for r in rows}, _session)
+        callers = await self._by_id("callers", {s.caller_id for s in sessions.values()}, _caller)
+        found = []
+        for r in rows:
+            session = sessions[r["session_id"]]
+            found.append((_message(r), callers[session.caller_id], session))
+        return found
+
+    async def recent_callers(self, limit: int = 100) -> list[Caller]:
+        """Callers, most recently heard from first."""
+        cur = await self._db.execute(
+            "SELECT * FROM callers ORDER BY last_seen DESC, id DESC LIMIT ?", (limit,)
+        )
+        return [_caller(r) for r in await cur.fetchall()]
+
+    async def _by_id[T](
+        self, table: str, ids: set[int], row: Callable[[aiosqlite.Row], T]
+    ) -> dict[int, T]:
+        """Rows of `table` (one of ours, never caller input) by id, in one query."""
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        cur = await self._db.execute(f"SELECT * FROM {table} WHERE id IN ({marks})", tuple(ids))
+        return {r["id"]: row(r) for r in await cur.fetchall()}
