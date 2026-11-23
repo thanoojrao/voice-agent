@@ -19,6 +19,7 @@ from scripts.run_evals import (
     load_cases,
     parse_verdict,
     sentence_count,
+    system_for,
 )
 from voice_agent.app.config import load_agent_config
 from voice_agent.core.interfaces import ToolCall, ToolResultPart, ToolUsePart
@@ -54,6 +55,33 @@ def test_owner_name_is_filled_in_as_a_literal(tmp_path):
     [case] = load_cases(path, "A.J.", TOOL_NAMES)
     assert case.conversation == (("caller", "hi A.J."),)
     assert check_never_says("I'm AxJx's AI", case.expect["says"]) is None  # dots aren't wildcards
+
+
+def test_a_case_can_give_the_last_calls_summary_and_message(tmp_path):
+    path = tmp_path / "cases.yaml"
+    path.write_text(
+        "- id: x\n"
+        "  caller: {name: Sam, last_summary: 'Asked {owner} for a call.', "
+        "last_message: 'Call me.'}\n"
+        "  conversation: [{caller: hi}]\n"
+        "  expect: {no_tool: true}\n",
+        encoding="utf-8",
+    )
+    [case] = load_cases(path, "Alex", TOOL_NAMES)
+    assert (case.last_summary, case.last_message) == ("Asked Alex for a call.", "Call me.")
+
+    class Prompt:  # records the call context instead of building the whole prompt
+        def system(self, call):
+            self.call = call
+            return []
+
+    prompt = Prompt()
+    system_for(case, prompt)  # type: ignore[arg-type]
+    assert (prompt.call.last_summary, prompt.call.last_message) == (
+        "Asked Alex for a call.",
+        "Call me.",
+    )
+    assert prompt.call.last_call_date is not None
 
 
 @pytest.mark.parametrize(

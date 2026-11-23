@@ -225,6 +225,7 @@ class Session:
         recent = None
         if last and last.summary and now - last.started_at <= SUMMARY_MAX_AGE:
             recent = last
+        message = await d.storage.session_message(recent.id) if recent else None
         self._session_id = await d.storage.create_session(caller.id, start)
 
         # Warm intro (design §8.4) comes with build step 7; until then the model just
@@ -239,6 +240,7 @@ class Session:
                 anonymous=start.caller_address is None,
                 last_summary=recent.summary if recent else None,
                 last_call_date=recent.started_at.date() if recent else None,
+                last_message=message.body if message else None,
             )
         )
         self._tools = tool_defs(Capability.END_SESSION in d.adapter.capabilities)

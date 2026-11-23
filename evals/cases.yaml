@@ -8,7 +8,9 @@
 # the owner's name or knowledge-base facts. Write {owner} where the owner's name goes; the
 # runner fills it in from agent.config.yaml.
 #
-#   caller:      what the call context knows: {name: Sam, anonymous: false} (both optional)
+#   caller:      what the call context knows: {name: Sam, anonymous: false, last_summary: "...",
+#                last_message: "..."} (all optional; last_message was left on their last
+#                call and has been passed on)
 #   conversation: earlier turns, in order; each is {caller: "..."} or {me: "..."}, or
 #                 {tool: {name, args, result}} for a tool I already called (result defaults
 #                 to {saved: true}). Back-to-back me and tool turns are one turn of mine.
@@ -134,6 +136,34 @@
       name: save_message
       args: {contact: this number}
       args_contain: {body: [backend, afternoon]}  # the whole message, not just the new part
+
+- id: last_message_not_saved_again
+  # Seen on a real call: a returning caller's message from last time was offered again
+  # and saved twice.
+  caller:
+    name: Sam
+    last_summary: "Sam asked for a callback on Friday at 3 PM about the backend role."
+    last_message: "Sam would like a callback on Friday at 3 PM about the backend role."
+  conversation:
+    - caller: "Tell me a bit about what you're working on."
+    - me: "Right now I'm building a phone agent that answers calls for me. Want to hear more?"
+    - caller: "No, that's good for now."
+  expect:
+    no_tool: save_message
+    judge: >-
+      Doesn't offer to save, send or pass on the earlier callback request again. Mentioning
+      it is fine only as already passed on.
+
+- id: last_message_already_passed_on
+  caller:
+    name: Sam
+    last_summary: "Sam asked for a callback on Friday at 3 PM about the backend role."
+    last_message: "Sam would like a callback on Friday at 3 PM about the backend role."
+  conversation:
+    - caller: "Did my message from last time get through?"
+  expect:
+    no_tool: save_message
+    judge: "Says yes, the earlier message was passed on, without offering to save it again."
 
 - id: off_topic
   conversation:

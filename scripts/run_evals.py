@@ -25,6 +25,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,7 @@ HTTP_TIMEOUT_S = 60.0
 
 EXPECT_KEYS = {"tool", "no_tool", "says", "never_says", "spell_tag", "judge"}
 CASE_KEYS = {"id", "caller", "conversation", "expect"}
-CALLER_KEYS = {"name", "anonymous"}
+CALLER_KEYS = {"name", "anonymous", "last_summary", "last_message"}
 TOOL_SPEC_KEYS = {"name", "args", "args_contain"}  # in expect
 TOOL_TURN_KEYS = {"name", "args", "result"}  # in the conversation
 DEFAULT_TOOL_RESULT = {"saved": True}
@@ -98,6 +99,8 @@ class Case:
     expect: dict[str, Any]
     caller_name: str | None = None
     anonymous: bool = False
+    last_summary: str | None = None  # their previous call, as the call context gives it
+    last_message: str | None = None  # the message they left on it (passed on)
 
 
 def load_cases(path: Path, owner_name: str, tool_names: set[str]) -> list[Case]:
@@ -152,7 +155,19 @@ def _parse_case(item: Any, owner_name: str, tool_names: set[str]) -> Case:
     for key in ("says", "never_says"):
         if key in expect:
             re.compile(expect[key])  # a bad regex fails here, not mid-run
-    return Case(cid, tuple(conversation), expect, caller.get("name"), bool(caller.get("anonymous")))
+    last = {k: _owner_in(caller.get(k), owner_name) for k in ("last_summary", "last_message")}
+    return Case(
+        cid,
+        tuple(conversation),
+        expect,
+        caller.get("name"),
+        bool(caller.get("anonymous")),
+        **last,
+    )
+
+
+def _owner_in(text: str | None, owner_name: str) -> str | None:
+    return text.replace(OWNER, owner_name) if text else None
 
 
 def _parse_tool_turn(value: Any, cid: str, tool_names: set[str]) -> PastToolCall:
@@ -249,7 +264,9 @@ def system_for(case: Case, prompt: Prompt) -> list[SystemBlock]:
             today=owner_clock().date(),
             caller_name=case.caller_name,
             anonymous=case.anonymous,
-            last_summary=None,
+            last_summary=case.last_summary,
+            last_call_date=owner_clock().date() - timedelta(days=1) if case.last_summary else None,
+            last_message=case.last_message,
         )
     )
 

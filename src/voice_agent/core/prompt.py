@@ -67,6 +67,7 @@ class CallContext:
     anonymous: bool
     last_summary: str | None  # already limited to recent calls by the session
     last_call_date: date | None = None
+    last_message: str | None = None  # the message left on that call; it's been passed on
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,9 +260,11 @@ def call_context(call: CallContext, status_updated: date | None, status_stale_da
 
     if call.last_summary:
         when = f" on {_spoken_date(call.last_call_date)}" if call.last_call_date else ""
+        lines.append(f"Summary of our last call{when}: {call.last_summary}")
+    if call.last_message:
         lines.append(
-            f"Summary of our last call{when}, for context only (anything from it, like a "
-            f"message, was already dealt with): {call.last_summary}"
+            "In our last call they left a message for the real me, and it was passed on: "
+            f'"{call.last_message}"'
         )
 
     if status_updated and (call.today - status_updated).days > status_stale_days:

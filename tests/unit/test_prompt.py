@@ -178,9 +178,19 @@ def test_last_summary():
         None,
         14,
     )
+    assert "Summary of our last call on November 1, 2026: Asked about the voice agent." in text
+    assert "left a message" not in text
+
+
+def test_last_message_is_marked_as_passed_on():
+    text = call_context(
+        call(last_summary="Asked for a callback.", last_message="Call me back on Friday."),
+        None,
+        14,
+    )
     assert (
-        "Summary of our last call on November 1, 2026, for context only (anything from it, "
-        "like a message, was already dealt with): Asked about the voice agent." in text
+        "In our last call they left a message for the real me, and it was passed on: "
+        '"Call me back on Friday."' in text
     )
 
 

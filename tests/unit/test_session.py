@@ -14,6 +14,7 @@ from voice_agent.core.interfaces import (
     CallNotes,
     Capability,
     Done,
+    MessageRow,
     ProviderError,
     SessionStart,
     TextDelta,
@@ -191,6 +192,24 @@ async def test_returning_caller_is_greeted_by_name_and_the_model_gets_the_summar
     await call.played(2)
     context = call.llm.calls[0].system[2].text
     assert "Sam" in context and "Asked about the voice agent." in context
+    await call.adapter.hang_up()
+    await call.ended()
+
+
+async def test_the_model_knows_the_last_calls_message_was_passed_on(store):
+    caller = await store.get_or_create_caller("twilio", NUMBER)
+    old = await store.create_session(caller.id, SessionStart("twilio", "CA0", NUMBER, 8000))
+    await store.save_message(old, MessageRow("Call me back on Friday.", NOW))
+    await store.end_session(old, "goodbye", "Left a callback request.")
+
+    call = Call(store, [reply("Sure.")])
+    await call.connect()
+    call.say("Hi again.")
+    await call.played(2)
+    context = call.llm.calls[0].system[2].text
+    assert 'left a message for the real me, and it was passed on: "Call me back on Friday."' in (
+        context
+    )
     await call.adapter.hang_up()
     await call.ended()
 
