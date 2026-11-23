@@ -317,6 +317,37 @@ async def test_backchannel_does_not_interrupt_and_is_not_answered(store):
     await call.ended()
 
 
+async def test_one_real_word_interrupts_when_the_turn_ends_not_mid_sentence(store):
+    call = Call(store, [reply("One two three four five six."), reply("Okay, stopping.")])
+    await call.connect()
+    call.adapter.auto_play = False
+    call.say("Question.")
+    await until(lambda: "t2.end" in call.adapter.marks)
+
+    call.stt.stream.emit(TurnStarted(), Words("Stop."))
+    await asyncio.sleep(0.05)
+    assert call.adapter.clears == 0  # one word: could be a stray word or noise
+    call.adapter.auto_play = True
+    call.stt.stream.emit(TurnEnded("Stop."))
+    await call.played(3)
+
+    assert call.adapter.clears == 1
+    assert call.tts.spoken[-1] == "Okay, stopping."
+    await call.adapter.hang_up()
+    await call.ended()
+
+
+async def test_a_hum_after_the_goodbye_does_not_carry_the_call_on(store):
+    settings = replace(SETTINGS, goodbye_hold_s=0.3)
+    call = Call(store, [goodbye()], settings=settings)
+    await call.connect()
+    call.say("Thanks, bye.")
+    await call.played(2)
+    call.say("Mhmm.")  # spelled the way Flux spelled it on a real call
+    assert await call.ended() == "goodbye"
+    assert len(call.llm.calls) == 1
+
+
 async def test_interrupting_the_goodbye_keeps_the_call_going(store):
     call = Call(store, [goodbye("Bye for now, take care."), reply("Of course.")])
     await call.connect()

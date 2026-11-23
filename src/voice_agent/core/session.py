@@ -33,7 +33,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
-from voice_agent.core.bargein import Heard, classify
+from voice_agent.core.bargein import Heard, classify, interrupts_now
 from voice_agent.core.clips import Clip, Clips
 from voice_agent.core.greeting import GreetingTemplates, build_opening, usable_name
 from voice_agent.core.history import History
@@ -266,7 +266,7 @@ class Session:
                 self._caller_speaking = True
                 self._caller_started_at = self._deps.clock()
             case Words(text=text):
-                if self._turn is not None and classify(text) is Heard.SPEECH:
+                if self._turn is not None and interrupts_now(text):
                     await self._interrupt()
             case TurnEnded(transcript=transcript):
                 await self._caller_turn_ended(transcript)

@@ -1,6 +1,6 @@
 import pytest
 
-from voice_agent.core.bargein import Heard, classify
+from voice_agent.core.bargein import Heard, classify, interrupts_now
 
 
 @pytest.mark.parametrize("text", ["", "   ", "...", "?"])
@@ -25,6 +25,16 @@ def test_no_words_is_nothing(text):
         "all right",
         "Oh, cool.",
         "yeah, sure",
+        # however speech-to-text spells a hum (the first is from a real call)
+        "Mhmm.",
+        "mmhmm",
+        "mhmmm",
+        "Hmmmm.",
+        "Umm.",
+        "uhm",
+        "uhhuh",
+        "Okaaay.",
+        "yeahhh",
     ],
 )
 def test_listening_noises_are_backchannel(text):
@@ -42,6 +52,9 @@ def test_listening_noises_are_backchannel(text):
         "I have a question",
         "Sorry, can you repeat that?",
         "see",
+        "him",
+        "stop",
+        "Mum's the word",
     ],
 )
 def test_real_words_are_speech(text):
@@ -57,3 +70,14 @@ def test_growing_transcript_turns_into_speech():
         Heard.SPEECH,
         Heard.SPEECH,
     ]
+
+
+@pytest.mark.parametrize("text", ["No, wait.", "hold on", "yeah but how", "Browse my"])
+def test_two_real_words_interrupt_mid_sentence(text):
+    assert interrupts_now(text)
+
+
+@pytest.mark.parametrize("text", ["", "Mhmm.", "yeah okay", "Stop.", "uh-huh no", "mm wait"])
+def test_fewer_than_two_real_words_wait_for_the_turn_to_end(text):
+    # A lone "Stop." still interrupts: classify() says SPEECH when the caller's turn ends.
+    assert not interrupts_now(text)
