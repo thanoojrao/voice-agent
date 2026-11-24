@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 
 from voice_agent.adapters.twilio.audio import SAMPLE_RATE
 from voice_agent.adapters.twilio.routes import twilio_router
+from voice_agent.admin.routes import admin_router
 from voice_agent.app.config import AgentConfig, Settings, load_agent_config
 from voice_agent.app.constants import (
     FILLER_AFTER_MS,
@@ -130,6 +131,7 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config.db_path.parent.mkdir(parents=True, exist_ok=True)
         storage = await SqliteStorage.open(config.db_path)
+        handle.storage = storage
         notifier: Notifier = gmail or _LogNotifier()
         # In the background, so a slow mail server never holds up the first call.
         resend = asyncio.create_task(send_unsent_messages(storage, notifier)) if gmail else None
@@ -172,6 +174,11 @@ def create_app() -> FastAPI:
     app.include_router(
         twilio_router(handle, secret("twilio_auth_token"), _required(settings.public_base_url))
     )
+    admin_password = settings.admin_password
+    if admin_password and admin_password.get_secret_value():
+        app.include_router(admin_router(handle.live_storage, admin_password, OWNER_TZ, owner_clock))
+    else:
+        log.info("ADMIN_PASSWORD isn't set, so there are no /admin pages")
     app.mount("/static/audio", StaticFiles(directory=CLIPS_DIR), name="audio")
 
     @app.get("/healthz", response_class=PlainTextResponse)
@@ -242,9 +249,16 @@ def _required(value: str | None) -> str:
 @dataclass
 class _RegistryHandle:
     """The routes are added when the app is built, but the registry needs the database,
-    which can only be opened inside the lifespan. The routes hold this handle instead."""
+    which can only be opened inside the lifespan. The routes hold this handle instead.
+    The admin pages read the database through it too."""
 
     registry: Registry | None = None
+    storage: SqliteStorage | None = None
+
+    def live_storage(self) -> SqliteStorage:
+        if self.storage is None:
+            raise RuntimeError("the app hasn't finished starting")
+        return self.storage
 
     def _live(self) -> Registry:
         if self.registry is None:

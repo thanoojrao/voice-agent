@@ -245,6 +245,22 @@ async def test_recent_sessions_newest_first_with_caller_turns_and_message(store)
     assert [r.session.id for r in await store.recent_sessions(limit=1)] == [second]
 
 
+async def test_recent_sessions_of_one_caller(store):
+    ann, first = await new_session(store)
+    await new_session(store, number="+15550199", ref="CA2")
+    _, third = await new_session(store, ref="CA3")
+
+    assert [r.session.id for r in await store.recent_sessions(caller_id=ann.id)] == [third, first]
+    assert await store.recent_sessions(caller_id=999) == []
+
+
+async def test_get_caller(store):
+    ann, _ = await new_session(store)
+    found = await store.get_caller(ann.id)
+    assert found is not None and (found.address, found.session_count) == (NUMBER, 1)
+    assert await store.get_caller(999) is None
+
+
 async def test_recent_sessions_empty(store):
     assert await store.recent_sessions() == []
 

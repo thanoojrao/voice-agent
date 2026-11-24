@@ -255,16 +255,21 @@ class SqliteStorage:
 
     # -- admin page reads (design doc §13) ------------------------------------
 
-    async def recent_sessions(self, limit: int = 100) -> list[SessionListing]:
-        """The newest calls first, each with its caller, how many times the caller spoke,
-        and whether they left a message."""
+    async def recent_sessions(
+        self, limit: int = 100, caller_id: int | None = None
+    ) -> list[SessionListing]:
+        """The newest calls first (only one caller's, if given), each with its caller, how
+        many times the caller spoke, and whether they left a message."""
+        where, args = (
+            ("WHERE s.caller_id = ? ", (caller_id,)) if caller_id is not None else ("", ())
+        )
         cur = await self._db.execute(
             "SELECT s.*, "
             "(SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.speaker = 'caller') "
             "AS caller_turns, "
             "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id) AS has_message "
-            "FROM sessions s ORDER BY s.id DESC LIMIT ?",
-            (limit,),
+            f"FROM sessions s {where}ORDER BY s.id DESC LIMIT ?",
+            (*args, limit),
         )
         rows = list(await cur.fetchall())
         callers = await self._by_id("callers", {r["caller_id"] for r in rows}, _caller)
@@ -274,6 +279,11 @@ class SqliteStorage:
             )
             for r in rows
         ]
+
+    async def get_caller(self, caller_id: int) -> Caller | None:
+        cur = await self._db.execute("SELECT * FROM callers WHERE id = ?", (caller_id,))
+        r = await cur.fetchone()
+        return _caller(r) if r else None
 
     async def get_session(self, session_id: int) -> tuple[SessionRow, Caller] | None:
         cur = await self._db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))

@@ -2,7 +2,7 @@
 
 A phone agent that answers calls as an AI version of me. Callers can ask about my work, my projects and what I'm up to right now. They can also leave a message, which reaches me by email. It always says up front that it's an AI.
 
-> **Status:** live on a real phone number, hosted on Fly.io. Calls, answers, interruptions, messages and the end-of-call email all work end to end. The read-only admin page is next, then a warm intro for returning callers. See the [build order](docs/technical-design.md#16-build-order-thin-slices).
+> **Status:** live on a real phone number, hosted on Fly.io. Calls, answers, interruptions, messages and the end-of-call email all work end to end, and a password-protected admin page shows the calls, transcripts, messages and callers. A warm intro for returning callers is next. See the [build order](docs/technical-design.md#16-build-order-thin-slices).
 
 ## How it works
 

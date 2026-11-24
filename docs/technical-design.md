@@ -96,6 +96,7 @@ voice_agent/
 │   ├── notify/gmail.py          # implements Notifier
 │   └── admin/
 │       ├── routes.py            # /admin pages, HTTP Basic auth
+│       ├── views.py             # labels, times and counts the pages show
 │       └── templates/*.html
 └── tests/
     ├── fakes/                   # FakeVoiceAdapter, FakeSTT, FakeLLM, FakeTTS, FakeNotifier
@@ -560,10 +561,13 @@ v0 has no hot reload. Changing config or the knowledge base means a restart or r
 
 ## 13. Admin page
 
-- Routes: `GET /admin` (sessions list), `GET /admin/sessions/{id}` (transcript with latency, interruptions and tool calls), `GET /admin/messages`, `GET /admin/callers`.
-- Auth: HTTP Basic over HTTPS, checking `ADMIN_PASSWORD` with `secrets.compare_digest`. That's enough for a single owner.
-- Read-only in v0. Jinja2 templates with one small CSS file and no JavaScript.
-- Latency view: per session, the average and p95 of `latency_ms` across agent turns, computed in SQL or Python at render time.
+- Laid out like a phone's call app: tabs for **Calls**, **Messages** and **Callers** (a bar along the bottom on a phone, a switch above the list on a wide screen), lists grouped by day, initials avatars, and a call's transcript as chat bubbles with tool calls as labels between them.
+- Routes: `GET /admin` (calls, newest first), `/admin/calls/{id}`, `/admin/messages`, `/admin/messages/{call id}`, `/admin/callers`, `/admin/callers/{id}`. Every page carries the list and, when one is open, the call or caller: a phone shows one of them with a back link, a screen 900px or wider shows both side by side. The stylesheet decides, so there's no JavaScript.
+- A call shows its summary, the message (how to reach them, emailed or not yet), how it ended, the reply times and the transcript. A caller shows their details and their calls. The Messages tab counts messages not emailed yet.
+- Reply times count only my replies to the caller: the greeting and "Are you still there?" have a latency but answer nothing. Per call: the average and the slowest, and how often I was cut off; each reply bubble shows its own.
+- Auth: HTTP Basic over HTTPS, checking `ADMIN_PASSWORD` with `secrets.compare_digest` (any username). That's enough for a single owner with a long password. With `ADMIN_PASSWORD` empty, the `/admin` routes don't exist.
+- Every response is `no-store`, `noindex`, can't be framed, and has a CSP allowing no scripts. Everything from callers is escaped by Jinja's autoescape.
+- Read-only in v0. Jinja2 templates (`admin/templates/page.html`) and one CSS file; the labels, times and counts are worked out in `admin/views.py`, so they're tested without HTML. Times are in the owner's time zone.
 
 ---
 
@@ -604,7 +608,7 @@ The fake adapter is also run with `caller_address=None`, which covers spec D30.
 3. ✅ **Real providers, no phone:** a dev script feeds a WAV file through Flux → Haiku → Cartesia and writes the reply WAV. Measure latency and the cache hit rate. Result: warm turns about 0.9–2.0 s from the caller stopping to the first audio (plus the phone network), most of it Claude; the cache hits on every turn after the prewarm. Also added along the way: the goodbye hold, spelling, pronunciations, the prewarm and the IPv4 retry.
 4. ✅ **Twilio adapter:** webhook, stream, marks and clear, fallback URL. Real calls work end to end (greeting, answers, barge-in, messages, hang-up); the stream's handshake signature is enforced, refused calls hear why, and the owner's numbers skip the per-caller cap.
 5. ✅ **Messages and email:** the Gmail notifier (`notify/gmail.py`, SMTP on port 465 with an app password) for the end-of-call email and alerts, and sending any message left unsent at startup.
-6. **Admin page.**
+6. ✅ **Admin page:** calls, messages and callers behind a password, phone-style with a split view on wide screens.
 7. **Warm intro, clips script.** (Caps, the session summary and anonymous handling were done in step 2.)
 8. **Run the acceptance checklist on real calls.** Tune latency.
 

@@ -58,6 +58,7 @@ def env(tmp_path, monkeypatch):
         "CONFIG_PATH": str(config),
     }.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
     return tmp_path
 
 
@@ -73,6 +74,20 @@ def test_app_starts_and_answers(env):
         assert stream_el is not None
         assert stream_el.get("url") == "wss://agent.example.com/twilio/stream"
     assert (env / "db" / "agent.db").exists()  # created on startup
+
+
+def test_no_admin_pages_without_a_password(env, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "")  # as .env.example leaves it
+    with TestClient(main.create_app()) as client:
+        assert client.get("/admin", auth=("admin", "")).status_code == 404
+
+
+def test_admin_pages_read_the_database(env, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "test admin password")
+    with TestClient(main.create_app()) as client:
+        assert client.get("/admin").status_code == 401
+        page = client.get("/admin", auth=("admin", "test admin password"))
+        assert page.status_code == 200 and "No calls yet." in page.text
 
 
 def test_missing_key_stops_startup(env, monkeypatch):
