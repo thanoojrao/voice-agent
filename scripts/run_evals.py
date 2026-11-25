@@ -6,14 +6,15 @@
     uv run python scripts/run_evals.py --kb kb.example       # the public example KB
 
 Each run sends one case's conversation to the model, exactly as a call would (same
-instructions, knowledge base, call context, greeting and tools), takes one reply, and grades
-it. Tools are never run: nothing is saved or emailed, only what the model tried to call is
-recorded. Rules with a `judge` line are graded by a second Claude call.
+instructions, knowledge base, call context, greeting and tools), takes the bot's whole turn,
+and grades it. Tools are never run: nothing is saved or emailed. Each call is recorded and
+answered with a made-up success, so the model carries on as it would on a call. Rules with
+a `judge` line are graded by a second Claude call.
 
-This costs money (one model call per run, plus one per judge line), so run it on purpose,
-after changing the instructions, a tool description or the model. Nothing is written to
-disk: the replies carry facts from the real knowledge base, so they're only printed, with
-email addresses masked.
+This costs money (a model call per run, more if it uses tools, plus one per judge line), so
+run it on purpose, after changing the instructions, a tool description or the model.
+Nothing is written to disk: the replies carry facts from the real knowledge base, so
+they're only printed, with email addresses masked.
 """
 
 from __future__ import annotations
@@ -40,11 +41,13 @@ from voice_agent.core.history import History
 from voice_agent.core.interfaces import (
     Caller,
     Done,
+    LanguageModel,
     Message,
     ProviderError,
     Refused,
     SystemBlock,
     TextDelta,
+    TextPart,
     ToolCall,
     ToolDef,
     ToolResultPart,
@@ -52,6 +55,7 @@ from voice_agent.core.interfaces import (
 )
 from voice_agent.core.prompt import CallContext, Prompt, load_instructions, load_knowledge_base
 from voice_agent.core.tools import tool_defs
+from voice_agent.core.turn import MAX_TOOL_ROUNDS
 from voice_agent.providers.anthropic_llm import AnthropicLLM, new_client
 
 CASES_PATH = Path("evals/cases.yaml")
@@ -272,23 +276,51 @@ def system_for(case: Case, prompt: Prompt) -> list[SystemBlock]:
 
 
 async def get_reply(
-    llm: AnthropicLLM, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]
+    llm: LanguageModel, system: list[SystemBlock], history: list[Message], tools: list[ToolDef]
 ) -> Reply:
+    """Everything the bot says in its turn. As on a real call (core/turn.py), each tool call
+    gets a result and the model carries on, until it stops calling tools or ends the call.
+    The tools aren't run: each one "succeeds" with DEFAULT_TOOL_RESULT."""
     reply = Reply()
+    messages = list(history)
+    spoken: list[str] = []
+    for _ in range(MAX_TOOL_ROUNDS + 1):
+        text, calls = await _request(llm, system, messages, tools, reply)
+        if text:
+            spoken.append(text)
+        reply.calls.extend(calls)
+        if reply.refused or not calls or any(c.name == "end_session" for c in calls):
+            break
+        uses = tuple(ToolUsePart(c.id, c.name, c.input) for c in calls)
+        result = json.dumps(DEFAULT_TOOL_RESULT)
+        messages.append(Message("assistant", ((TextPart(text),) if text else ()) + uses))
+        messages.append(Message("user", tuple(ToolResultPart(c.id, result) for c in calls)))
+    reply.text = " ".join(spoken)
+    return reply
+
+
+async def _request(
+    llm: LanguageModel,
+    system: list[SystemBlock],
+    messages: list[Message],
+    tools: list[ToolDef],
+    reply: Reply,
+) -> tuple[str, list[ToolCall]]:
+    """One model request: its text and tool calls. Adds its tokens and any refusal to `reply`."""
     parts: list[str] = []
-    async for event in llm.stream_reply(system, history, tools):
+    calls: list[ToolCall] = []
+    async for event in llm.stream_reply(system, messages, tools):
         if isinstance(event, TextDelta):
             parts.append(event.text)
         elif isinstance(event, ToolCall):
-            reply.calls.append(event)
+            calls.append(event)
         elif isinstance(event, Refused):
             reply.refused = True
         elif isinstance(event, Done):
-            reply.input_tokens = event.input_tokens
-            reply.cached_tokens = event.cache_read_tokens
-            reply.output_tokens = event.output_tokens
-    reply.text = "".join(parts).strip()
-    return reply
+            reply.input_tokens += event.input_tokens
+            reply.cached_tokens += event.cache_read_tokens
+            reply.output_tokens += event.output_tokens
+    return "".join(parts).strip(), calls
 
 
 # -- code checks ------------------------------------------------------------------------------

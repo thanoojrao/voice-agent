@@ -15,6 +15,7 @@ from scripts.run_evals import (
     check_no_tool,
     check_speakable,
     check_tool,
+    get_reply,
     history_for,
     load_cases,
     parse_verdict,
@@ -22,8 +23,17 @@ from scripts.run_evals import (
     system_for,
 )
 from voice_agent.app.config import load_agent_config
-from voice_agent.core.interfaces import ToolCall, ToolResultPart, ToolUsePart
+from voice_agent.core.interfaces import (
+    Done,
+    Message,
+    TextDelta,
+    TextPart,
+    ToolCall,
+    ToolResultPart,
+    ToolUsePart,
+)
 from voice_agent.core.tools import tool_defs
+from voice_agent.core.turn import MAX_TOOL_ROUNDS
 
 TOOL_NAMES = {t.name for t in tool_defs(can_end_session=True)}
 FIRST_PERSON = r"\b(he|him|his)\b"
@@ -209,3 +219,63 @@ def test_parse_verdict():
     assert parse_verdict('{"reason": "gave a recipe", "passed": false}') == (False, "gave a recipe")
     with pytest.raises(ValueError):
         parse_verdict('{"reason": "fine"}')
+
+
+# -- the bot's whole turn -----------------------------------------------------------------------
+
+
+class ScriptedLLM:
+    """Plays back one list of events per request, and keeps the messages each one saw."""
+
+    def __init__(self, *rounds):
+        self.rounds = list(rounds)
+        self.seen = []
+
+    async def stream_reply(self, system, history, tools):
+        self.seen.append(history)
+        for event in self.rounds.pop(0):
+            yield event
+
+    async def summarize(self, transcript):
+        raise NotImplementedError
+
+    async def prewarm(self, system, tools):
+        pass
+
+
+def _done():
+    return Done("end_turn", input_tokens=10, output_tokens=5, cache_read_tokens=100)
+
+
+async def test_a_turn_carries_on_after_a_tool_call():
+    save = ToolCall("t1", "save_caller_details", {"name": "Sam"})
+    llm = ScriptedLLM(
+        [TextDelta("Thanks, Sam."), save, _done()],
+        [TextDelta("Thanks, Sam. What can I help with?"), _done()],
+    )
+    reply = await get_reply(llm, [], [Message("user", (TextPart("Sam."),))], [])
+    # Both requests are what the caller hears: the repeat shows.
+    assert reply.text == "Thanks, Sam. Thanks, Sam. What can I help with?"
+    assert reply.calls == [save]
+    assert (reply.input_tokens, reply.cached_tokens, reply.output_tokens) == (20, 200, 10)
+    said, results = llm.seen[1][-2:]
+    assert said.parts == (
+        TextPart("Thanks, Sam."),
+        ToolUsePart("t1", "save_caller_details", {"name": "Sam"}),
+    )
+    [result] = results.parts
+    assert isinstance(result, ToolResultPart) and result.tool_use_id == "t1"
+
+
+async def test_a_turn_stops_at_end_session():
+    end = ToolCall("t1", "end_session", {"reason": "goodbye"})
+    llm = ScriptedLLM([TextDelta("Bye!"), end, _done()])
+    reply = await get_reply(llm, [], [], [])
+    assert (reply.text, reply.calls, len(llm.seen)) == ("Bye!", [end], 1)
+
+
+async def test_a_turn_that_keeps_calling_tools_is_cut_short():
+    again = [ToolCall("t", "save_caller_details", {"name": "Sam"}), _done()]
+    llm = ScriptedLLM(*[again] * 10)
+    reply = await get_reply(llm, [], [], [])
+    assert len(llm.seen) == MAX_TOOL_ROUNDS + 1 and reply.text == ""

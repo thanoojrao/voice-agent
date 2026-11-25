@@ -202,6 +202,7 @@
   expect:  # saving the name is guaranteed by the end-of-call summary (tests/unit/test_session.py)
     says: '\bSam\b'
     never_says: "save|caller.details|tool"
+    judge: "Greets them by name once and moves on. Doesn't repeat itself or say the same thing twice."
 
 - id: plain_words
   conversation:
